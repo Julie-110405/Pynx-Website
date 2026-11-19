@@ -1,7 +1,7 @@
 const DEPARTMENT_ROUTES = {
     "admin": "../Admin/admin_dashboard.html",
     "finance": "../Finance/finance_dashboard.html",
-    "marketing": "../Maketing/marketing_dashboard.html",
+    "marketing": "../Marketing/marketing_dashboard.html",
     "procurement": "../Procurement/procurement_dashboard.html",
     "inventory": "../Inventory/inventory_dashboard.html",
     "logistics": "../Logistics/logistics_dashboard.html"
