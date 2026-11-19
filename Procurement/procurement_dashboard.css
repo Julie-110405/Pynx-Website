@@ -5,14 +5,23 @@
     --mut: #6b655d;
     --card: #fff;
     --line: #e8e3dc;
+
     --ok: #1f7a4d;
     --okb: #d8f0e2;
+
     --warn: #a8741a;
     --warnb: #fbecc8;
+
     --bad: #b3392f;
     --badb: #f8d9d5;
+
     --sb: #000;
     --acc: #111;
+
+    --sidebar-w: 270px;
+    --radius-card: 20px;
+    --radius-field: 12px;
+    --gap: 18px;
 }
 
 * {
@@ -22,18 +31,21 @@
 html,
 body {
     margin: 0;
+    min-height: 100%;
 }
 
 body {
-    font-family: Quicksand, Inter, "Segoe UI", system-ui, -apple-system, Arial, sans-serif;
+    font-family: Quicksand, Inter, "Segoe UI", system-ui, Arial, sans-serif;
     background: var(--bg);
     color: var(--ink);
     font-size: 14px;
 }
 
+/* MAIN LAYOUT */
+
 .app {
     display: grid;
-    grid-template-columns: 260px 1fr;
+    grid-template-columns: var(--sidebar-w) 1fr;
     min-height: 100vh;
 }
 
@@ -73,14 +85,9 @@ body {
     border-radius: 12px;
     color: #fff;
     text-decoration: none;
-
-    /* ROBOTO SIDEBAR FONT */
-    font-family: 'Roboto', sans-serif;
     font-size: 15.5px;
     font-weight: 500;
-
     cursor: pointer;
-    transition: background 0.2s ease;
 }
 
 .nav a:hover {
@@ -91,36 +98,16 @@ body {
     background: #3a3a3a;
 }
 
-/* SIDEBAR ICONS */
-
-.nav-icon {
-    width: 20px;
-    min-width: 20px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    text-align: center;
-    font-size: 18px;
-    line-height: 1;
-}
-
 .nav a:focus-visible,
 button:focus-visible {
-    outline: 2px solid var(--acc);
+    outline: 2px solid #fff;
     outline-offset: 2px;
 }
 
-/* LOGOUT */
-
-.nav a.logout-link {
-    margin-top: 12px;
+.nav-icon {
+    width: 20px;
+    text-align: center;
 }
-
-.nav a.logout-link:hover {
-    background: #3a3a3a;
-}
-
-/* USER INFORMATION */
 
 .who {
     margin-top: auto;
@@ -149,22 +136,22 @@ h1 {
     margin: 0 0 4px;
 }
 
-.sub {
-    color: var(--mut);
-    margin: 0 0 22px;
-}
-
 h2 {
     font-weight: 600;
     font-size: 17px;
     margin: 0 0 12px;
 }
 
-/* CARDS */
+.sub {
+    color: var(--mut);
+    margin: 0 0 22px;
+}
+
+/* CARDS AND GRIDS */
 
 .card {
     background: var(--card);
-    border-radius: 20px;
+    border-radius: var(--radius-card);
     padding: 20px;
 }
 
@@ -209,7 +196,7 @@ h2 {
     border-top: 0;
 }
 
-/* STATUS BADGES */
+/* STATUS PILLS */
 
 .pill {
     display: inline-block;
@@ -239,7 +226,7 @@ h2 {
     color: var(--bad);
 }
 
-/* TOOLS AND SEARCH */
+/* TOOLS */
 
 .tools {
     display: flex;
@@ -254,7 +241,7 @@ select {
     font: inherit;
     padding: 10px 12px;
     border: 1px solid var(--line);
-    border-radius: 12px;
+    border-radius: var(--radius-field);
     background: #fff;
     min-width: 0;
     width: 100%;
@@ -276,6 +263,10 @@ button {
     border: 1px solid var(--line);
     background: #fff;
     cursor: pointer;
+}
+
+button:hover {
+    opacity: 0.85;
 }
 
 button.pri {
@@ -347,12 +338,12 @@ label {
     margin: 12px 0 5px;
 }
 
-/* MODAL */
+/* MODALS */
 
 .modal {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, .45);
+    background: rgba(0, 0, 0, 0.45);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -392,10 +383,9 @@ label {
     z-index: 10;
 }
 
-/* RESPONSIVE */
+/* TABLET */
 
-@media(max-width: 1000px) {
-
+@media (max-width: 1000px) {
     .g4 {
         grid-template-columns: 1fr 1fr;
     }
@@ -403,11 +393,11 @@ label {
     .g2 {
         grid-template-columns: 1fr;
     }
-
 }
 
-@media(max-width: 800px) {
+/* MOBILE */
 
+@media (max-width: 800px) {
     .app {
         grid-template-columns: 1fr;
     }
@@ -416,10 +406,6 @@ label {
         position: static;
         height: auto;
         padding: 12px 10px;
-    }
-
-    .brand {
-        text-align: center;
     }
 
     .nav {
@@ -446,21 +432,17 @@ label {
     h1 {
         font-size: 25px;
     }
-
 }
 
-@media(max-width: 520px) {
-
+@media (max-width: 520px) {
     .g4 {
         grid-template-columns: 1fr;
     }
-
 }
 
 /* PRINT */
 
 @media print {
-
     .sb,
     .tools,
     .tabs,
@@ -480,5 +462,4 @@ label {
         position: static;
         background: none;
     }
-
 }
