@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Marketing Dashboard | PYNX</title>
+  <link rel="stylesheet" href="css/marketing_dashboard.css" />
+</head>
+<body>
+  <div class="layout">
+
+    <!-- Sidebar (drawn by js/marketing_sidebar.js) -->
+    <aside class="sidebar" id="sidebar"></aside>
+
+    <!-- Every menu page is drawn here (see js/marketing_app.js) -->
+    <main class="main" id="view"></main>
+
+  </div>
+
+  <!-- Order matters: data -> helpers -> sidebar -> app (router) -> pages -->
+  <script src="js/marketing_data.js"></script>
+  <script src="js/marketing_ui.js"></script>
+  <script src="js/marketing_sidebar.js"></script>
+  <script src="js/marketing_app.js"></script>
+  <script src="js/marketing_dashboard.js"></script>
+  <script src="js/marketing_requisition.js"></script>
+  <script src="js/marketing_designs.js"></script>
+  <script src="js/marketing_products.js"></script>
+  <script src="js/marketing_history.js"></script>
+  <script src="js/marketing_notifications.js"></script>
+</body>
+</html>

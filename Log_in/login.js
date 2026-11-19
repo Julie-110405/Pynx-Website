@@ -3,12 +3,12 @@ const DEPARTMENT_ROUTES = {
     "finance": "../Finance/finance_dashboard.html",
     "marketing": "../Maketing/marketing_dashboard.html",
     "procurement": "../Procurement/procurement_dashboard.html",
-    "inventory": "../Inventory/pynx-inventory/index.html",
+    "inventory": "../Inventory/inventory_dashboard.html",
     "logistics": "../Logistics/logistics_dashboard.html"
 };
 
 const loginForm = document.getElementById("loginForm");
-const usernameInput = document.getElementById("username");
+const usernameInput = document.getElementById("email");
 const passwordInput = document.getElementById("password");
 const errorMessage = document.getElementById("errorMessage");
 const loginButton = document.getElementById("loginButton");
@@ -44,7 +44,7 @@ loginForm.addEventListener("submit", async function (event) {
             });
 
         if (authError || !authData || !authData.user) {
-            showError("Invalid username or password.");
+            showError("Invalid email or password.");
             setLoading(false);
             return;
         }

@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pynx Inventory Dashboard</title>
+  <link rel="icon" href="../logo/pynx-logo.png">
+  <link rel="stylesheet" href="inventory_dashboard.css">
+
+  <!-- Supabase connection -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="../config/supabase.js"></script>
+</head>
+<body>
+  <div class="app">
+    <aside class="sb">
+      <img class="logo" src="../logo/pynx-logo.png" alt="Pynx - Beyond the Trend">
+      <nav class="nav" id="nav" aria-label="Main"></nav>
+      <div class="who" id="who"></div>
+    </aside>
+    <main id="main"></main>
+  </div>
+
+  <script src="inventory_dashboard.js"></script>
+</body>
+</html>

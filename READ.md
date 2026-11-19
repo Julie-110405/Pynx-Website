@@ -27,6 +27,8 @@ Procument - procurement@phynx.web, procurement323
 Inventory - inventory@phynx.web, inventory999
 Logistics - logictics@phynx.web, logictics111
 
+
+
 Database password: 2004jjmvvt2004
 
 Supabase:
