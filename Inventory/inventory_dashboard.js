@@ -341,18 +341,167 @@
   }
 
   /* ---------------------------------------------------------------------
-     REQUISITION and DELIVERY (handled by other team members)
+     REQUISITION (Stage 5): validate stock, release, forward shortages to Procurement
      --------------------------------------------------------------------- */
-  function viewRequisition(root) {
-    root.innerHTML = `
-      ${head('Requisition', 'Process approved material requests from other departments.')}
+  const rq = { status: 'active' };
+
+  async function viewRequisition(root, openId) {
+    root.innerHTML = head('Requisition', 'Process approved material requests from other departments.') +
+      '<div class="card"><p class="mut">Loading requisitions…</p></div>';
+
+    const { data, error } = await sb.from('marketing_requisitions')
+      .select('id, project, reason, needed_by, status, inventory_confirmed, created_at, ' +
+              'marketing_requisition_items(id, sku, material_name, unit, qty, released)')
+      .in('status', ['Approved', 'Partial', 'Completed'])
+      .order('created_at', { ascending: false });
+    if (error) {
+      root.innerHTML = head('Requisition') + `<div class="card"><p>${esc(error.message)}</p></div>`;
+      return;
+    }
+    const reqs = (data || []).map(r => ({
+      ...r, items: (r.marketing_requisition_items || []).sort((a, b) => a.id - b.id)
+    }));
+
+    const toValidate = reqs.filter(r => r.status === 'Approved' && !r.inventory_confirmed).length;
+    const ready = reqs.filter(r => r.inventory_confirmed && r.status !== 'Completed').length;
+    const partial = reqs.filter(r => r.status === 'Partial').length;
+
+    const stat = r => r.status === 'Completed' ? pill('ok', 'Completed')
+      : r.status === 'Partial' ? pill('warn', 'Partially released')
+      : r.inventory_confirmed ? pill('ok', 'Ready to release') : pill('warn', 'To validate');
+
+    const wrap = document.createElement('div');
+    wrap.innerHTML = `
+      ${head('Requisition', 'Validate approved requests against stock, release materials, and forward shortages to Procurement.')}
+      <div class="grid g3">
+        <div class="card"><div class="mut">To validate</div><div class="big">${toValidate}</div><div class="mut">Approved, availability not checked</div></div>
+        <div class="card"><div class="mut">Ready to release</div><div class="big">${ready}</div><div class="mut">Validated, materials still to release</div></div>
+        <div class="card"><div class="mut">Partially released</div><div class="big">${partial}</div><div class="mut">Waiting for remaining stock</div></div>
+      </div>
       <div class="card">
-        <h2>Coming soon</h2>
-        <p>This page will show approved requisitions, check stock availability, release materials to the requesting department and forward shortages to Procurement.</p>
-        <p class="mut">Released quantities are saved as stock-out records in the <b>inventory_movements</b> table, and product stock updates automatically.</p>
+        <div class="tools">
+          <select id="rq-status" aria-label="Filter">
+            ${options([['active', 'Active requests'], ['completed', 'Completed'], ['all', 'All']], rq.status)}
+          </select>
+        </div>
+        <div id="rq-table"></div>
+        <p class="mut" style="margin:10px 0 0">Logistics requisitions will appear here once their Procurement link is added.</p>
       </div>`;
+    root.replaceChildren(wrap);
+
+    function draw() {
+      const list = reqs.filter(r => rq.status === 'all' ||
+        (rq.status === 'completed' ? r.status === 'Completed' : r.status !== 'Completed'));
+      const rows = list.map(r => {
+        const done = r.items.filter(i => Number(i.released) >= Number(i.qty)).length;
+        const first = r.items[0] ? esc(r.items[0].material_name) : '—';
+        const more = r.items.length > 1 ? ` +${r.items.length - 1} more` : '';
+        return `<tr>
+          <td><b>${esc(r.id)}</b></td><td>${esc(r.project)}</td><td>${fdate(r.needed_by)}</td>
+          <td>${first}${more}<small>${done} of ${r.items.length} released</small></td>
+          <td>${stat(r)}</td>
+          <td><div class="acts"><button type="button" class="sm" data-open="${esc(r.id)}">Open</button></div></td></tr>`;
+      }).join('');
+      $('#rq-table', wrap).innerHTML = table(['Reference', 'Project', 'Needed by', 'Materials', 'Status', ''], rows,
+        'No requisitions waiting for Inventory.');
+    }
+    draw();
+    $('#rq-status', wrap).addEventListener('change', e => { rq.status = e.target.value; draw(); });
+    on(wrap, 'click', '[data-open]', el => {
+      const r = reqs.find(x => x.id === el.dataset.open);
+      if (r) openRequisition(r, root);
+    });
+
+    if (openId) { const r = reqs.find(x => x.id === openId); if (r) openRequisition(r, root); }
   }
 
+  async function openRequisition(r, root) {
+    const prs = await sb.from('purchase_requests').select('code, item, qty, status').eq('requisition_id', r.id);
+    const key = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : (Date.now() + '-' + Math.random());
+    const canAct = r.status === 'Approved' || r.status === 'Partial';
+
+    const lines = r.items.map(it => {
+      const p = it.sku ? findProduct(it.sku) : null;
+      const remaining = Number(it.qty) - Number(it.released);
+      const onHand = p ? Number(p.qty) : 0;
+      return { it, p, remaining, onHand,
+        canRelease: Math.max(0, Math.min(remaining, onHand)),
+        shortage: Math.max(0, remaining - onHand) };
+    });
+
+    const rows = lines.map(L => `<tr>
+      <td><b>${esc(L.it.material_name)}</b><small>${esc(L.it.sku || 'No SKU')}</small></td>
+      <td class="r">${num(L.it.qty)} ${esc(L.it.unit)}</td>
+      <td class="r">${num(L.it.released)}</td>
+      <td class="r">${num(L.remaining)}</td>
+      <td class="r">${L.p ? num(L.onHand) : '—'}</td>
+      <td class="r">${L.shortage > 0 ? pill('bad', num(L.shortage)) : pill('ok', '0')}</td>
+      <td class="r">${canAct && r.inventory_confirmed && L.canRelease > 0
+        ? `<input type="number" class="rel" data-item="${L.it.id}" min="0" max="${L.canRelease}" step="any" value="${L.canRelease}" style="width:90px">` : '—'}</td>
+      <td>${canAct && r.inventory_confirmed && L.shortage > 0
+        ? `<button type="button" class="sm" data-fwd="${L.it.id}" data-q="${L.shortage}">Forward ${num(L.shortage)}</button>` : ''}</td>
+    </tr>`).join('');
+
+    const m = modal(`
+      <h2>${esc(r.id)} · ${esc(r.project)}</h2>
+      <p class="mut">${esc(r.reason)} · Needed by ${fdate(r.needed_by)}</p>
+      ${table(['Material', '#Requested', '#Released', '#Remaining', '#On hand', '#Shortage', '#Release now', ''], rows)}
+      ${prs.data && prs.data.length
+        ? `<p class="mut">Purchase requests: ${prs.data.map(x =>
+            `${esc(x.code)} (${num(x.qty)} ${esc(x.item)}, ${esc(x.status)})`).join('; ')}</p>` : ''}
+      ${canAct && !r.inventory_confirmed
+        ? '<p class="hint">Check the quantities above against stock, then confirm availability to enable releasing.</p>' : ''}
+      <p class="acts">
+        <button type="button" data-close>Close</button>
+        ${canAct && !r.inventory_confirmed ? '<button type="button" class="pri" data-confirm>Confirm availability</button>' : ''}
+        ${canAct && r.inventory_confirmed ? '<button type="button" class="pri" data-release>Release selected</button>' : ''}
+      </p>`);
+
+    const reload = async (reopen) => { await loadData(); viewRequisition(root, reopen ? r.id : undefined); };
+
+    on(m, 'click', '[data-confirm]', async el => {
+      el.disabled = true;
+      const { error } = await sb.rpc('rw_inventory_confirm', { p_req: r.id });
+      if (error) { el.disabled = false; return toast(error.message); }
+      closeModal(); toast('Availability confirmed'); reload(true);
+    });
+
+    on(m, 'click', '[data-release]', async el => {
+      const payload = [];
+      m.querySelectorAll('input.rel').forEach(i => {
+        const q = Number(i.value);
+        if (q > 0) payload.push({ item_id: Number(i.dataset.item), qty: q });
+      });
+      if (!payload.length) return toast('Enter a quantity to release.');
+      for (const l of payload) {
+        const L = lines.find(x => x.it.id === l.item_id);
+        if (l.qty > L.canRelease) return toast(`${L.it.material_name}: only ${num(L.canRelease)} can be released now.`);
+      }
+      el.disabled = true;
+      const { data: res, error } = await sb.rpc('rw_release_items',
+        { p_req: r.id, p_lines: payload, p_request_key: key });
+      if (error) { el.disabled = false; return toast(error.message); }
+      closeModal();
+      toast(res && res.duplicate ? 'Already released' : 'Stock released');
+      reload(false);
+    });
+
+    on(m, 'click', '[data-fwd]', async el => {
+      const q = Number(el.dataset.q);
+      const L = lines.find(x => String(x.it.id) === el.dataset.fwd);
+      closeModal();
+      const ok = await confirmBox('Forward shortage?',
+        `Create a purchase request for ${num(q)} ${L.it.unit} of ${L.it.material_name}?`, 'Forward', false);
+      if (!ok) return viewRequisition(root, r.id);
+      const { error } = await sb.rpc('rw_forward_shortage', { p_req: r.id, p_item_id: L.it.id, p_qty: q });
+      if (error) toast(error.message); else toast('Shortage forwarded to Procurement');
+      viewRequisition(root, r.id);
+    });
+  }
+
+  /* ---------------------------------------------------------------------
+     DELIVERY (handled by other team members)
+     --------------------------------------------------------------------- */
   function viewDelivery(root) {
     root.innerHTML = `
       ${head('Delivery', 'Verify and record materials received from Logistics.')}

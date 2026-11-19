@@ -142,3 +142,13 @@ tbody tr:hover { background: #faf8f5; }
 }
 @media (max-width: 560px) { .metrics { grid-template-columns: 1fr; } }
 @media print { .sidebar, .toolbar, .actions { display: none !important; } .app { display: block; } main { padding: 0; } }
+
+/* ---------- Stage 2 additions ---------- */
+.loading-msg, .empty-msg { color: var(--mut); text-align: center; padding: 22px 8px; }
+.error-msg { color: var(--bad); }
+td.error-msg { text-align: center; padding: 22px 8px; }
+.rw-toast { position: fixed; bottom: 22px; right: 22px; background: #111; color: #fff; padding: 12px 18px; border-radius: 12px; font-size: 13.5px; z-index: 1100; box-shadow: 0 6px 20px rgba(0,0,0,.25); }
+
+@media (max-width: 900px) {
+  .sidebar-note { display: block; margin-top: 0; border-top: 0; padding-top: 0; text-align: center; }
+}
