@@ -222,15 +222,18 @@ async function load() {
         }))
     ];
 
-    D.inv = (iv || [])
-        .filter(x => !x.archived)
-        .map(x => ({
-            id: x.sku,
-            item: x.name,
-            unit: x.unit || '',
-            stock: Number(x.qty) || 0,
-            min: Number(x.min_level) || 0
-        }));
+ D.inv = (iv || [])
+    .filter(x => !x.archived)
+    .map(x => ({
+        id: x.sku,
+        item: x.name,
+        supplier: x.supplier || '',
+        category: x.category || '',
+        unit: x.unit || '',
+        stock: Number(x.qty) || 0,
+        min: Number(x.min_level) || 0,
+        unitCost: Number(x.unit_cost) || 0
+    }));
 }
 
 // NAVIGATION
@@ -630,57 +633,166 @@ function delivery() {
 
 // CREATE PURCHASE REQUEST
 
+
+// CREATE PURCHASE REQUEST
+
 function newPR(reqId, item) {
     const r = D.reqs.find(x => String(x.id) === String(reqId));
-
     curReq = r ? r.id : null;
 
+    const products = D.inv;
     const suppliers = D.suppliers.filter(x => x.status === 'Active');
+
+    const requestedItem = r ? r.item : (item || '');
+    const selectedProduct = products.find(p =>
+        p.id === requestedItem ||
+        p.item.toLowerCase() === String(requestedItem).toLowerCase()
+    );
 
     modal(`
         <h2>New purchase request</h2>
 
-        <label for="f1">Item</label>
-        <input id="f1" value="${esc(r ? r.item : item || '')}">
+        <div style="display:grid;gap:8px;margin-top:16px">
 
-        <label for="f2">Quantity</label>
-        <input
-            id="f2"
-            type="number"
-            min="1"
-            value="${r && r.qty ? r.qty : 1}"
-        >
+            <label for="f1">Item / Product</label>
+            <select id="f1" onchange="updatePRFields()">
+                <option value="">Select a product</option>
+                ${products.map(p => `
+                    <option value="${esc(p.id)}"
+                        ${selectedProduct && selectedProduct.id === p.id ? 'selected' : ''}>
+                        ${esc(p.item)} (${esc(p.id)})
+                    </option>
+                `).join('')}
+            </select>
 
-        <label for="f3">Supplier</label>
-        <select id="f3">
-            ${suppliers.map(x => `
-                <option value="${x._id}">${esc(x.name)}</option>
-            `).join('')}
-        </select>
+            <label for="f2">Quantity</label>
+            <input id="f2" type="number" min="1"
+                value="${r && r.qty ? r.qty : 1}"
+                oninput="updatePRCost()">
 
-        <label for="f4">Estimated cost (₱)</label>
-        <input id="f4" type="number" min="0" value="0">
+            <label for="f3">Supplier</label>
+            <select id="f3">
+                <option value="">Select supplier</option>
+                ${suppliers.map(s => `
+                    <option value="${s._id}">${esc(s.name)}</option>
+                `).join('')}
+            </select>
 
-        <div class="tools" style="margin-top:16px;justify-content:flex-end">
+            <label for="f4">Estimated Cost (₱)</label>
+            <input id="f4" type="number" min="0" value="0" readonly>
+
+        </div>
+
+        <div class="tools" style="margin-top:20px;justify-content:flex-end">
             <button onclick="closeM()">Cancel</button>
             <button class="pri" onclick="savePR()">Save request</button>
         </div>
     `);
+
+    updatePRFields();
 }
 
+function updatePRFields() {
+    const product = D.inv.find(p => p.id === $('#f1').value);
+
+    if (!product) {
+        $('#f3').value = '';
+        $('#f4').value = 0;
+        return;
+    }
+
+    const supplier = D.suppliers.find(s =>
+        s.status === 'Active' &&
+        s.name.trim().toLowerCase() ===
+        product.supplier.trim().toLowerCase()
+    );
+
+    $('#f3').value = supplier ? supplier._id : '';
+
+    updatePRCost();
+}
+
+function updatePRCost() {
+    const product = D.inv.find(p => p.id === $('#f1').value);
+    const qty = Number($('#f2').value);
+
+    $('#f4').value = product && qty > 0
+        ? (product.unitCost * qty).toFixed(2)
+        : 0;
+}
+
+
+
+// UPDATE PRODUCT, SUPPLIER AND COST
+
+function updatePRFields() {
+    const sku = $('#f1').value;
+
+    const product = D.inv.find(p => p.id === sku);
+
+    if (!product) {
+        $('#f3').value = '';
+        $('#f4').value = 0;
+        return;
+    }
+
+    // Automatically select the product's registered supplier
+    const matchingSupplier = D.suppliers.find(s =>
+        s.status === 'Active' &&
+        s.name.trim().toLowerCase() === product.supplier.trim().toLowerCase()
+    );
+
+    $('#f3').value = matchingSupplier ? matchingSupplier._id : '';
+
+    updatePRCost();
+}
+
+
+// AUTOMATIC COST COMPUTATION
+
+function updatePRCost() {
+    const sku = $('#f1').value;
+    const qty = Number($('#f2').value);
+
+    const product = D.inv.find(p => p.id === sku);
+
+    if (!product || qty < 1) {
+        $('#f4').value = 0;
+        return;
+    }
+
+    $('#f4').value = (product.unitCost * qty).toFixed(2);
+}
+
+
+// SAVE PURCHASE REQUEST
+
 async function savePR() {
-    const item = $('#f1').value.trim();
+    const sku = $('#f1').value;
+    const product = D.inv.find(p => p.id === sku);
+
     const qty = Number($('#f2').value);
     const sid = Number($('#f3').value);
 
-    if (!item || qty < 1 || !sid) {
-        toast('Enter an item, a quantity of at least 1, and a supplier');
+    if (!product) {
+        toast('Please select a valid inventory product.');
+        return;
+    }
+
+    if (qty < 1) {
+        toast('Quantity must be at least 1.');
+        return;
+    }
+
+    if (!sid) {
+        toast('Please select an active supplier.');
         return;
     }
 
     const row = {
-        item,
-        qty,
+        item: product.item,
+        product_sku: product.id,
+        qty: qty,
         supplier_id: sid,
         est_cost: Number($('#f4').value) || 0,
         created_by: ME.id
@@ -701,6 +813,7 @@ async function savePR() {
         .insert(row);
 
     if (error) {
+        console.error(error);
         toast('Could not save: ' + error.message);
         return;
     }
@@ -709,7 +822,7 @@ async function savePR() {
     await load();
     go('purchasing', 'Purchase Requests');
 
-    toast('Purchase request saved');
+    toast('Purchase request saved successfully!');
 }
 
 // CREATE PURCHASE ORDER AND DELIVERY

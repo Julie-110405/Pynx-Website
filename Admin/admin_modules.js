@@ -193,42 +193,174 @@
   // =====================================================================
   // PURCHASING MONITORING
   // =====================================================================
+  
+  // =====================================================================
+  // PURCHASING MONITORING
+  // =====================================================================
+
   let purRows = [];
+
   async function loadPurchasing() {
-    const sec = $('#purchasing'), tb = $('tbody', sec);
-    metricsLoading(sec); loading(tb, 8);
-    setHead($('table', sec), ['PURCHASE REQUEST', 'PURCHASE ORDER', 'SUPPLIER', 'ITEM', 'QTY', 'COST', 'ORDER DATE', 'STATUS']);
+    const sec = $('#purchasing');
+    const tb = $('tbody', sec);
+
+    metricsLoading(sec);
+    loading(tb, 9);
+
+    setHead($('table', sec), [
+      'PURCHASE REQUEST',
+      'PURCHASE ORDER',
+      'SUPPLIER',
+      'ITEM',
+      'QTY',
+      'COST',
+      'ORDER DATE',
+      'STATUS',
+      'ACTION'
+    ]);
+
     try {
-      const [prs, pos, sups] = await Promise.all([get('purchase_requests', '*', q => q.order('created_at', { ascending: false })),
-        get('purchase_orders', '*', q => q.order('created_at', { ascending: false })), get('suppliers', 'id,name')]);
-      const sname = {}; sups.forEach(s => { sname[s.id] = s.name; });
-      const prById = {}; prs.forEach(p => { prById[p.id] = p; });
+      const [prs, pos, sups] = await Promise.all([
+        get('purchase_requests', '*',
+          q => q.order('created_at', { ascending: false })),
+        get('purchase_orders', '*',
+          q => q.order('created_at', { ascending: false })),
+        get('suppliers', 'id,name')
+      ]);
+
+      const sname = {};
+      sups.forEach(s => {
+        sname[s.id] = s.name;
+      });
+
+      const prById = {};
+      prs.forEach(p => {
+        prById[p.id] = p;
+      });
+
       const usedPr = new Set();
-      purRows = pos.map(o => { const pr = prById[o.purchase_request_id]; if (pr) usedPr.add(pr.id);
-        return { pr: pr ? pr.code : '–', po: o.code, supplier: sname[o.supplier_id] || '–', item: o.item, qty: o.qty,
-          cost: o.total, date: o.order_date, status: o.status }; });
-      prs.filter(p => !usedPr.has(p.id)).forEach(p => purRows.push({ pr: p.code, po: '–', supplier: sname[p.supplier_id] || '–',
-        item: p.item, qty: p.qty, cost: p.est_cost, date: String(p.created_at).slice(0, 10), status: p.status }));
+
+      purRows = pos.map(o => {
+        const pr = prById[o.purchase_request_id];
+
+        if (pr) usedPr.add(pr.id);
+
+        return {
+          prId: pr ? pr.id : null,
+          pr: pr ? pr.code : '–',
+          po: o.code,
+          supplier: sname[o.supplier_id] || '–',
+          item: o.item,
+          qty: o.qty,
+          cost: o.total,
+          date: o.order_date,
+          status: o.status
+        };
+      });
+
+      prs.filter(p => !usedPr.has(p.id)).forEach(p => {
+        purRows.push({
+          prId: p.id,
+          pr: p.code,
+          po: '–',
+          supplier: sname[p.supplier_id] || '–',
+          item: p.item,
+          qty: p.qty,
+          cost: p.est_cost,
+          date: String(p.created_at).slice(0, 10),
+          status: p.status
+        });
+      });
+
       const open = pos.filter(o => ACTIVE_PO.includes(o.status));
-      metric(sec, 0, 'Purchase Requests', prs.length, `${prs.filter(p => p.status === 'Pending').length} pending`);
-      metric(sec, 1, 'Active Orders', open.length, 'Sent, confirmed or delayed');
-      metric(sec, 2, 'Open Order Value', peso(open.reduce((s, o) => s + Number(o.total), 0)), 'Total of active orders');
-      metric(sec, 3, 'Cancelled', pos.filter(o => o.status === 'Cancelled').length, 'Purchase orders');
+
+      metric(
+        sec, 0, 'Purchase Requests',
+        prs.length,
+        `${prs.filter(p => p.status === 'Pending').length} pending`
+      );
+
+      metric(
+        sec, 1, 'Active Orders',
+        open.length,
+        'Sent, confirmed or delayed'
+      );
+
+      metric(
+        sec, 2, 'Open Order Value',
+        peso(open.reduce((s, o) => s + Number(o.total), 0)),
+        'Total of active orders'
+      );
+
+      metric(
+        sec, 3, 'Cancelled',
+        pos.filter(o => o.status === 'Cancelled').length,
+        'Purchase orders'
+      );
+
       const sels = $$('.toolbar select', sec);
-      fillSelect(sels[0], 'All suppliers', [...new Set(purRows.map(r => r.supplier).filter(s => s !== '–'))].sort());
-      fillSelect(sels[1], 'All statuses', [...new Set(purRows.map(r => r.status))].sort());
+
+      fillSelect(
+        sels[0],
+        'All suppliers',
+        [...new Set(purRows.map(r => r.supplier)
+          .filter(s => s !== '–'))].sort()
+      );
+
+      fillSelect(
+        sels[1],
+        'All statuses',
+        [...new Set(purRows.map(r => r.status))].sort()
+      );
+
       drawPurchasing();
-    } catch (e) { fail(tb, 8, e); }
+
+    } catch (e) {
+      fail(tb, 9, e);
+    }
   }
+
   function drawPurchasing() {
-    const sec = $('#purchasing'), tb = $('tbody', sec), sels = $$('.toolbar select', sec);
-    const q = ($('.toolbar input', sec).value || '').trim().toLowerCase();
-    const list = purRows.filter(r => (!sels[0].value || r.supplier === sels[0].value) && (!sels[1].value || r.status === sels[1].value) &&
-      (!q || [r.pr, r.po, r.supplier, r.item].join(' ').toLowerCase().includes(q)));
-    tb.innerHTML = list.length ? list.map(r => `<tr><td class="primary-cell">${esc(r.pr)}</td><td class="primary-cell">${esc(r.po)}</td>
-      <td>${esc(r.supplier)}</td><td>${esc(r.item)}</td><td>${num(r.qty)}</td><td>${peso(r.cost)}</td><td>${fd(r.date)}</td><td>${sbadge(r.status)}</td></tr>`).join('')
-      : msgRow(8, 'No purchase requests or orders found.', 'empty-msg');
+    const sec = $('#purchasing');
+    const tb = $('tbody', sec);
+    const sels = $$('.toolbar select', sec);
+
+    const q = ($('.toolbar input', sec).value || '')
+      .trim().toLowerCase();
+
+    const list = purRows.filter(r =>
+      (!sels[0].value || r.supplier === sels[0].value) &&
+      (!sels[1].value || r.status === sels[1].value) &&
+      (!q || [r.pr, r.po, r.supplier, r.item]
+        .join(' ').toLowerCase().includes(q))
+    );
+
+    tb.innerHTML = list.length
+      ? list.map(r => `
+        <tr>
+          <td class="primary-cell">${esc(r.pr)}</td>
+          <td class="primary-cell">${esc(r.po)}</td>
+          <td>${esc(r.supplier)}</td>
+          <td>${esc(r.item)}</td>
+          <td>${num(r.qty)}</td>
+          <td>${peso(r.cost)}</td>
+          <td>${fd(r.date)}</td>
+          <td>${sbadge(r.status)}</td>
+          <td>
+            ${
+              r.prId && r.status === 'Pending'
+                ? `<button type="button"
+                     data-approve-pr="${r.prId}">
+                     Approve
+                   </button>`
+                : '–'
+            }
+          </td>
+        </tr>
+      `).join('')
+      : msgRow(9, 'No purchase requests or orders found.', 'empty-msg');
   }
+
 
   // =====================================================================
   // DELIVERY MONITORING
@@ -454,6 +586,70 @@
     on($('.toolbar input', sec), 'input', fn);
     $$('.toolbar select', sec).forEach(s => s.addEventListener('change', fn));
   });
+
+  // ADMIN APPROVAL FOR PURCHASE REQUESTS
+
+  on($('#purchasing tbody'), 'click', async e => {
+    const btn = e.target.closest('[data-approve-pr]');
+
+    if (!btn) return;
+
+    const id = Number(btn.dataset.approvePr);
+
+    if (!Number.isInteger(id)) {
+      alert('Invalid purchase request ID.');
+      return;
+    }
+
+    if (!confirm('Approve this purchase request?')) {
+      return;
+    }
+
+    try {
+      const {
+        data: { user },
+        error: userError
+      } = await sb.auth.getUser();
+
+      if (userError || !user) {
+        alert('Unable to verify Admin account.');
+        return;
+      }
+
+      btn.disabled = true;
+      btn.textContent = 'Approving...';
+
+      const { data, error } = await sb
+        .from('purchase_requests')
+        .update({
+          status: 'Approved',
+          approved_by: user.id
+        })
+        .eq('id', id)
+        .eq('status', 'Pending')
+        .select('id');
+
+      if (error) throw error;
+
+      if (!data || data.length === 0) {
+        alert(
+          'No request was updated. Check Admin permissions and request status.'
+        );
+        await loadPurchasing();
+        return;
+      }
+
+      alert('Purchase request approved successfully!');
+
+      await loadPurchasing();
+
+    } catch (error) {
+      console.error('Purchase approval error:', error);
+      alert('Approval failed: ' + error.message);
+      await loadPurchasing();
+    }
+  });
+
   bindReports();
   window.addEventListener('hashchange', route);
   route();

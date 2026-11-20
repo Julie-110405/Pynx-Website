@@ -5,16 +5,10 @@
 ========================================== */
 
 const $ = selector => document.querySelector(selector);
-
 const sb = window.supabaseClient;
-
 const LOGIN_URL = '../Log_in/login.html';
 
 let ME = null;
-
-/* ==========================================
-   HELPERS
-========================================== */
 
 const esc = value =>
     String(value ?? '').replace(/[&<>"']/g, char => ({
@@ -42,13 +36,11 @@ const pill = status =>
     `<span class="pill ${CLS[status] || 'Pen'}">${esc(status)}</span>`;
 
 const fmt = date =>
-    date
-        ? new Date(date + 'T00:00:00').toLocaleDateString('en-PH', {
-            month: 'short',
-            day: 'numeric',
-            year: 'numeric'
-        })
-        : '';
+    date ? new Date(date + 'T00:00:00').toLocaleDateString('en-PH', {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric'
+    }) : '';
 
 function generateCode(prefix) {
     return `${prefix}-${Date.now()}`;
@@ -56,12 +48,9 @@ function generateCode(prefix) {
 
 function toast(message) {
     const element = document.createElement('div');
-
     element.className = 'toast';
     element.textContent = message;
-
     document.body.appendChild(element);
-
     setTimeout(() => element.remove(), 2500);
 }
 
@@ -70,9 +59,8 @@ function toast(message) {
 ========================================== */
 
 async function guard(allowedDepartments) {
-
     if (!sb) {
-        alert('Supabase configuration was not loaded. Check config/supabase.js.');
+        alert('Supabase configuration was not loaded.');
         return false;
     }
 
@@ -94,12 +82,9 @@ async function guard(allowedDepartments) {
 
     if (error || !profile) {
         console.error('Profile error:', error);
-
-        alert('Unable to verify your department. Please log in again.');
-
+        alert('Unable to verify your department.');
         await sb.auth.signOut();
         window.location.href = LOGIN_URL;
-
         return false;
     }
 
@@ -107,10 +92,8 @@ async function guard(allowedDepartments) {
 
     if (!allowedDepartments.includes(department)) {
         alert('You are not authorized to access Logistics.');
-
         await sb.auth.signOut();
         window.location.href = LOGIN_URL;
-
         return false;
     }
 
@@ -123,10 +106,7 @@ async function guard(allowedDepartments) {
 }
 
 async function logout() {
-
-    if (!confirm('Are you sure you want to log out?')) {
-        return;
-    }
+    if (!confirm('Are you sure you want to log out?')) return;
 
     const { error } = await sb.auth.signOut();
 
@@ -145,11 +125,11 @@ async function logout() {
 const D = {
     dels: [],
     disc: [],
-    reqs: []
+    reqs: [],
+    products: []
 };
 
 async function get(tableName, columns, orderColumn) {
-
     const { data, error } = await sb
         .from(tableName)
         .select(columns)
@@ -168,34 +148,42 @@ async function get(tableName, columns, orderColumn) {
 ========================================== */
 
 async function load() {
+    const [
+        deliveries,
+        discrepancies,
+        requisitions,
+        products
+    ] = await Promise.all([
+        get(
+            'deliveries',
+            '*, suppliers(name), purchase_orders(code)',
+            'expected_date'
+        ),
 
-    const [deliveries, discrepancies, requisitions] =
-        await Promise.all([
+        get(
+            'delivery_discrepancies',
+            '*, deliveries(code)',
+            'id'
+        ),
 
-            get(
-                'deliveries',
-                '*, suppliers(name), purchase_orders(code)',
-                'expected_date'
-            ),
+        get(
+            'logistics_requisitions',
+            '*',
+            'created_at'
+        ),
 
-            get(
-                'delivery_discrepancies',
-                '*, deliveries(code)',
-                'id'
-            ),
-
-            get(
-                'logistics_requisitions',
-                '*',
-                'created_at'
-            )
-
-        ]);
+        get(
+            'inventory_products',
+            '*',
+            'name'
+        )
+    ]);
 
     if (
         deliveries === null ||
         discrepancies === null ||
-        requisitions === null
+        requisitions === null ||
+        products === null
     ) {
         toast('Some data could not load. Check the browser console.');
     }
@@ -225,8 +213,24 @@ async function load() {
         _id: row.id,
         item: row.item,
         qty: row.qty,
+        purpose: row.purpose || '',
+        needed: row.needed_by || '',
+        reason: row.reason || '',
         status: row.status
     }));
+
+    // Products from the real inventory table
+    D.products = (products || [])
+        .filter(product =>
+            !product.archived &&
+            Number(product.qty) > 0
+        )
+        .map(product => ({
+            sku: product.sku,
+            name: product.name,
+            unit: product.unit || '',
+            stock: Number(product.qty) || 0
+        }));
 }
 
 /* ==========================================
@@ -248,7 +252,6 @@ const TABS = [
 ];
 
 const ICONS = {
-
     dashboard: `
         <svg viewBox="0 0 24 24">
             <rect x="3" y="3" width="8" height="8" rx="1"/>
@@ -295,15 +298,9 @@ const find = id =>
     D.dels.find(delivery => delivery.id === id);
 
 function go(newView, newTab) {
-
     view = newView;
-
-    if (newTab) {
-        tab = newTab;
-    }
-
+    if (newTab) tab = newTab;
     q = '';
-
     render();
 }
 
@@ -312,12 +309,9 @@ function go(newView, newTab) {
 ========================================== */
 
 function modal(content) {
-
     $('#layer').innerHTML = `
         <div class="modal" onclick="if(event.target === this) closeM()">
-            <div class="card">
-                ${content}
-            </div>
+            <div class="card">${content}</div>
         </div>
     `;
 }
@@ -326,9 +320,7 @@ function closeM() {
     $('#layer').innerHTML = '';
 }
 
-const cancel = `
-    <button onclick="closeM()">Cancel</button>
-`;
+const cancel = `<button onclick="closeM()">Cancel</button>`;
 
 const btns = (...buttons) => `
     <div class="tools noprint"
@@ -357,7 +349,6 @@ const table = (columns, rows) => `
                     ${columns.map(column => `<th>${column}</th>`).join('')}
                 </tr>
             </thead>
-
             <tbody>
                 ${rows.join('') || `
                     <tr>
@@ -376,7 +367,6 @@ const table = (columns, rows) => `
 ========================================== */
 
 function dashboard() {
-
     const incoming = by(['Pending', 'Scheduled', 'Delayed']);
 
     const open = D.disc.filter(
@@ -385,13 +375,11 @@ function dashboard() {
 
     return `
         <h1>Welcome to Logistics!</h1>
-
         <p class="sub">
             Receive, inspect, and report on incoming deliveries.
         </p>
 
         <div class="grid g4">
-
             <div class="card">
                 <div class="mut">Incoming Deliveries</div>
                 <div class="big">${incoming.length}</div>
@@ -415,20 +403,15 @@ function dashboard() {
                 <div class="big">${by(['Completed']).length}</div>
                 <div class="mut">Successfully inspected</div>
             </div>
-
         </div>
 
         <div class="grid g2">
-
             <div class="card">
                 <h2>Quick Actions</h2>
 
                 <div class="row">
-                    <span>
-                        <b>Receive Delivery</b><br>
-                        <span class="mut">Record an arrived delivery</span>
-                    </span>
-
+                    <span><b>Receive Delivery</b><br>
+                    <span class="mut">Record an arrived delivery</span></span>
                     <button class="pri sm"
                         onclick="go('delivery','Incoming Deliveries')">
                         Receive
@@ -436,11 +419,8 @@ function dashboard() {
                 </div>
 
                 <div class="row">
-                    <span>
-                        <b>Start Inspection</b><br>
-                        <span class="mut">Check received items</span>
-                    </span>
-
+                    <span><b>Start Inspection</b><br>
+                    <span class="mut">Check received items</span></span>
                     <button class="sm"
                         onclick="go('delivery','Inspection')">
                         Inspect
@@ -448,14 +428,9 @@ function dashboard() {
                 </div>
 
                 <div class="row">
-                    <span>
-                        <b>Report Discrepancy</b><br>
-                        <span class="mut">Missing or damaged items</span>
-                    </span>
-
-                    <button class="sm" onclick="reportD()">
-                        Report
-                    </button>
+                    <span><b>Report Discrepancy</b><br>
+                    <span class="mut">Missing or damaged items</span></span>
+                    <button class="sm" onclick="reportD()">Report</button>
                 </div>
             </div>
 
@@ -464,31 +439,22 @@ function dashboard() {
 
                 <div class="row">
                     <span>${open.length} deliveries have discrepancies.</span>
-
                     <button class="sm"
-                        onclick="go('delivery','Discrepancies')">
-                        View
-                    </button>
+                        onclick="go('delivery','Discrepancies')">View</button>
                 </div>
 
                 <div class="row">
                     <span>${by(['Delayed']).length} deliveries are delayed.</span>
-
                     <button class="sm"
-                        onclick="go('delivery','Incoming Deliveries')">
-                        View
-                    </button>
+                        onclick="go('delivery','Incoming Deliveries')">View</button>
                 </div>
             </div>
-
         </div>
 
         <div class="card">
             <h2>Upcoming Deliveries</h2>
-
             ${table(
                 ['Delivery ID', 'PO number', 'Supplier', 'Expected', 'Status'],
-
                 incoming.slice(0, 3).map(delivery => `
                     <tr>
                         <td>${esc(delivery.id)}</td>
@@ -504,102 +470,281 @@ function dashboard() {
 }
 
 /* ==========================================
-   REQUISITION
+   REQUISITION LIST
 ========================================== */
 
 function requisition() {
-
     return `
         <h1>Requisition</h1>
-
         <p class="sub">
             Request materials and supplies. Logistics acts as Requester.
         </p>
 
         <div class="card">
-
             <div class="tools">
                 ${search('Search requisitions')}
-
                 <button class="pri" onclick="newReq()">
                     New requisition
                 </button>
             </div>
 
             ${table(
-                ['ID', 'Item', 'Qty', 'Status'],
-
+                ['ID', 'Purpose', 'Item', 'Qty', 'Needed by', 'Status'],
                 D.reqs.filter(has).map(request => `
                     <tr>
                         <td>${esc(request.id)}</td>
+                        <td>${esc(request.purpose)}</td>
                         <td>${esc(request.item)}</td>
                         <td>${request.qty}</td>
+                        <td>${esc(request.needed)}</td>
                         <td>${pill(request.status)}</td>
                     </tr>
                 `)
             )}
-
         </div>
     `;
 }
 
-function newReq() {
+/* ==========================================
+   PRODUCT DROPDOWN ROWS
+========================================== */
 
-    modal(`
-        <h2>New requisition</h2>
+let requisitionRowCount = 0;
 
-        <label for="a1">Item</label>
-        <input id="a1" placeholder="Enter item name">
+function productOptions() {
+    if (!D.products.length) {
+        return `<option value="">No available products</option>`;
+    }
 
-        <label for="a2">Quantity</label>
-        <input id="a2" type="number" min="1" value="1">
-
-        <label for="a3">Reason</label>
-        <input id="a3" placeholder="Reason for request">
-
-        ${btns(
-            cancel,
-            '<button class="pri" onclick="saveReq()">Submit requisition</button>'
-        )}
-    `);
+    return `
+        <option value="">Select a product</option>
+        ${D.products.map(product => `
+            <option value="${esc(product.sku)}">
+                ${esc(product.name)} (${product.stock} ${esc(product.unit)})
+            </option>
+        `).join('')}
+    `;
 }
 
-async function saveReq() {
+function addMaterialRow() {
+    const container = $('#materialRows');
+    if (!container) return;
 
-    const item = $('#a1').value.trim();
-    const qty = Number($('#a2').value);
-    const reason = $('#a3').value.trim();
+    const rowId = ++requisitionRowCount;
 
-    if (!item || !Number.isInteger(qty) || qty < 1) {
-        toast('Enter an item and a valid quantity.');
+    const row = document.createElement('div');
+    row.className = 'material-row';
+    row.dataset.row = rowId;
+
+    row.style.cssText =
+        'display:grid;grid-template-columns:minmax(0,1fr) 110px auto;gap:10px;align-items:end;margin-bottom:12px;';
+
+    row.innerHTML = `
+        <div>
+            <label>Product</label>
+            <select class="material-product"
+                onchange="updateMaterialStock(${rowId})">
+                ${productOptions()}
+            </select>
+            <small class="mut stock-info" id="stock-${rowId}">
+                Select a product to see available stock.
+            </small>
+        </div>
+
+        <div>
+            <label>Quantity</label>
+            <input class="material-qty"
+                type="number" min="1" step="1" value="1">
+        </div>
+
+        <button type="button" class="sm"
+            onclick="removeMaterialRow(${rowId})">
+            Remove
+        </button>
+    `;
+
+    container.appendChild(row);
+}
+
+function updateMaterialStock(rowId) {
+    const row = document.querySelector(
+        `.material-row[data-row="${rowId}"]`
+    );
+
+    if (!row) return;
+
+    const sku = row.querySelector('.material-product').value;
+    const product = D.products.find(item => item.sku === sku);
+    const stockLabel = $(`#stock-${rowId}`);
+
+    if (!product) {
+        stockLabel.textContent =
+            'Select a product to see available stock.';
         return;
     }
 
-    const record = {
-        code: generateCode('LR'),
-        item,
-        qty,
+    stockLabel.textContent =
+        `Available stock: ${product.stock} ${product.unit}`;
+}
+
+function removeMaterialRow(rowId) {
+    const row = document.querySelector(
+        `.material-row[data-row="${rowId}"]`
+    );
+
+    if (row) row.remove();
+}
+
+/* ==========================================
+   NEW REQUISITION FORM
+========================================== */
+
+function newReq() {
+    if (!D.products.length) {
+        toast('No available inventory products. Check Inventory first.');
+        return;
+    }
+
+    requisitionRowCount = 0;
+
+    modal(`
+        <h2>New Requisition</h2>
+
+        <label for="reqPurpose">Project / Purpose</label>
+        <input id="reqPurpose"
+            placeholder="Enter project or purpose">
+
+        <label for="reqNeededBy">Needed by</label>
+        <input id="reqNeededBy" type="date"
+            min="${new Date().toISOString().slice(0, 10)}">
+
+        <label for="reqReason">Reason for request</label>
+        <textarea id="reqReason"
+            rows="3"
+            style="width:100%;font:inherit;padding:10px 12px;border:1px solid var(--line);border-radius:12px;"
+            placeholder="Explain why these materials are needed"></textarea>
+
+        <div style="margin-top:18px;">
+            <h2>Materials needed</h2>
+            <div id="materialRows"></div>
+            <button type="button" onclick="addMaterialRow()">
+                + Add material
+            </button>
+        </div>
+
+        ${btns(
+            cancel,
+            '<button class="pri" onclick="saveReq()">Submit to Admin</button>'
+        )}
+    `);
+
+    addMaterialRow();
+}
+
+/* ==========================================
+   SAVE MULTI-ITEM REQUISITION
+========================================== */
+
+async function saveReq() {
+    const purpose = $('#reqPurpose').value.trim();
+    const neededBy = $('#reqNeededBy').value;
+    const reason = $('#reqReason').value.trim();
+
+    const rows = [
+        ...document.querySelectorAll('.material-row')
+    ];
+
+    if (!purpose || !neededBy || !reason) {
+        toast('Complete the purpose, needed-by date, and reason.');
+        return;
+    }
+
+    if (!rows.length) {
+        toast('Add at least one material.');
+        return;
+    }
+
+    const materials = [];
+
+    for (const row of rows) {
+        const sku = row.querySelector('.material-product').value;
+        const qty = Number(row.querySelector('.material-qty').value);
+
+        const product = D.products.find(item => item.sku === sku);
+
+        if (!product) {
+            toast('Please select a valid product for every row.');
+            return;
+        }
+
+        if (!Number.isInteger(qty) || qty < 1) {
+            toast(`Enter a valid quantity for ${product.name}.`);
+            return;
+        }
+
+        if (qty > product.stock) {
+            toast(`Requested quantity exceeds available stock for ${product.name}.`);
+            return;
+        }
+
+        materials.push({
+            item: product.name,
+            qty
+        });
+    }
+
+    const firstMaterial = materials[0];
+    const requisitionCode = generateCode('LR');
+
+    // Parent record: retain legacy item and qty columns
+    const parentRecord = {
+        code: requisitionCode,
+        purpose,
+        needed_by: neededBy,
         reason,
+        item: firstMaterial.item,
+        qty: firstMaterial.qty,
         status: 'Pending',
         created_by: ME.id
     };
 
-    const { error } = await sb
+    const { data: parent, error: parentError } = await sb
         .from('logistics_requisitions')
-        .insert(record);
+        .insert(parentRecord)
+        .select('id')
+        .single();
 
-    if (error) {
-        console.error('Requisition error:', error);
-        toast('Could not submit: ' + error.message);
+    if (parentError) {
+        console.error('Requisition error:', parentError);
+        toast('Could not submit requisition: ' + parentError.message);
+        return;
+    }
+
+    // Child records: all selected materials
+    const itemRecords = materials.map(material => ({
+        requisition_id: parent.id,
+        item: material.item,
+        qty: material.qty
+    }));
+
+    const { error: itemsError } = await sb
+        .from('logistics_requisition_items')
+        .insert(itemRecords);
+
+    if (itemsError) {
+        console.error('Requisition items error:', itemsError);
+        toast(
+            'Requisition created, but materials could not be saved: ' +
+            itemsError.message
+        );
         return;
     }
 
     closeM();
-
     await load();
     render();
 
-    toast('Requisition submitted successfully.');
+    toast('Requisition submitted to Admin successfully.');
 }
 
 /* ==========================================
@@ -607,7 +752,6 @@ async function saveReq() {
 ========================================== */
 
 function delivery() {
-
     let content = '';
 
     const action = (id, label, functionName, primary = false) => `
@@ -623,7 +767,6 @@ function delivery() {
     /* INCOMING DELIVERIES */
 
     if (tab === TABS[0]) {
-
         content = table(
             ['Delivery ID', 'PO number', 'Supplier', 'Items', 'Expected', 'Status', ''],
 
@@ -646,7 +789,6 @@ function delivery() {
     /* INSPECTION */
 
     if (tab === TABS[1]) {
-
         content = table(
             ['Delivery ID', 'PO number', 'Supplier', 'Items', 'Status', ''],
 
@@ -668,7 +810,6 @@ function delivery() {
     /* DISCREPANCIES */
 
     if (tab === TABS[2]) {
-
         content = `
             <div class="tools">
                 <button class="pri" onclick="reportD()">
@@ -697,7 +838,6 @@ function delivery() {
     /* RESOLUTIONS */
 
     if (tab === TABS[3]) {
-
         content = table(
             ['ID', 'Delivery', 'Issue', 'Resolution', 'Status'],
 
@@ -718,7 +858,6 @@ function delivery() {
     /* REPORTS */
 
     if (tab === TABS[4]) {
-
         content = `
             <div class="tools noprint">
                 ${search('Search deliveries')}
@@ -760,7 +899,6 @@ function delivery() {
         </p>
 
         <div class="tabs">
-
             ${TABS.map(item => `
                 <button
                     class="${item === tab ? 'on' : ''}"
@@ -768,7 +906,6 @@ function delivery() {
                     ${item}
                 </button>
             `).join('')}
-
         </div>
 
         <div class="card">
@@ -782,7 +919,6 @@ function delivery() {
 ========================================== */
 
 async function receive(id) {
-
     const delivery = find(id);
 
     if (!delivery) {
@@ -807,7 +943,6 @@ async function receive(id) {
 
     await load();
     render();
-
     receipt(id);
 }
 
@@ -816,7 +951,6 @@ async function receive(id) {
 ========================================== */
 
 function receipt(id) {
-
     const delivery = find(id);
 
     if (!delivery) {
@@ -828,7 +962,6 @@ function receipt(id) {
         <h2>Receiving receipt</h2>
 
         <div class="rc">
-
             <div class="row">
                 <span>Delivery</span>
                 <b>${esc(delivery.id)}</b>
@@ -858,7 +991,6 @@ function receipt(id) {
                 <span>Status</span>
                 <span>${esc(delivery.status)}</span>
             </div>
-
         </div>
 
         ${btns(
@@ -873,7 +1005,6 @@ function receipt(id) {
 ========================================== */
 
 function inspect(id) {
-
     const delivery = find(id);
 
     if (!delivery) {
@@ -918,7 +1049,6 @@ function inspect(id) {
 ========================================== */
 
 async function addIssue(delivery, issue) {
-
     const { error: insertError } = await sb
         .from('delivery_discrepancies')
         .insert({
@@ -948,7 +1078,6 @@ async function addIssue(delivery, issue) {
 ========================================== */
 
 async function saveInspect(id) {
-
     const delivery = find(id);
 
     if (!delivery) {
@@ -967,11 +1096,8 @@ async function saveInspect(id) {
     let error;
 
     if (isBad) {
-
         error = await addIssue(delivery, issue);
-
     } else {
-
         const result = await sb
             .from('deliveries')
             .update({
@@ -989,7 +1115,6 @@ async function saveInspect(id) {
     }
 
     closeM();
-
     await load();
 
     go(
@@ -1009,7 +1134,6 @@ async function saveInspect(id) {
 ========================================== */
 
 function reportD() {
-
     const availableDeliveries = D.dels.filter(
         delivery =>
             !['Pending', 'Scheduled', 'Delayed'].includes(delivery.status)
@@ -1034,7 +1158,6 @@ function reportD() {
         </select>
 
         <label for="r2">Issue</label>
-
         <input id="r2" placeholder="Missing or damaged items">
 
         ${btns(
@@ -1045,7 +1168,6 @@ function reportD() {
 }
 
 async function saveD() {
-
     const id = $('#r1').value;
     const issue = $('#r2').value.trim();
 
@@ -1070,9 +1192,7 @@ async function saveD() {
     }
 
     closeM();
-
     await load();
-
     go('delivery', 'Discrepancies');
 
     toast('Discrepancy reported.');
@@ -1083,7 +1203,6 @@ async function saveD() {
 ========================================== */
 
 function resolve(id) {
-
     modal(`
         <h2>Resolve ${esc(id)}</h2>
 
@@ -1107,7 +1226,6 @@ function resolve(id) {
 }
 
 async function saveRes(id) {
-
     const discrepancy = D.disc.find(
         item => item.id === id
     );
@@ -1148,9 +1266,7 @@ async function saveRes(id) {
     }
 
     closeM();
-
     await load();
-
     go('delivery', 'Resolutions');
 
     toast('Discrepancy resolved.');
@@ -1161,7 +1277,6 @@ async function saveRes(id) {
 ========================================== */
 
 function render(keepSearch = false) {
-
     $('#nav').innerHTML = `
         ${VIEWS.map(([key, label]) => `
             <a
@@ -1200,7 +1315,6 @@ function render(keepSearch = false) {
     })[view]();
 
     if (keepSearch) {
-
         const input = document.querySelector('main input');
 
         if (input) {
@@ -1217,7 +1331,6 @@ function render(keepSearch = false) {
 ========================================== */
 
 async function init() {
-
     $('#main').innerHTML = `
         <p class="mut">Loading Logistics dashboard...</p>
     `;
@@ -1230,8 +1343,8 @@ async function init() {
         ME.department + ' • ' + (ME.username || '');
 
     await load();
-
     render();
 }
 
 init();
+
