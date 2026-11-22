@@ -188,15 +188,22 @@ async function load() {
         toast('Some data could not load. Check the browser console.');
     }
 
-    D.dels = (deliveries || []).map(row => ({
-        id: row.code,
-        _id: row.id,
-        po: row.purchase_orders?.code || '',
-        supplier: row.suppliers?.name || '',
-        date: fmt(row.expected_date),
-        items: row.items || '',
-        status: row.status
-    }));
+   D.dels = (deliveries || []).map(row => ({
+    id: row.code,
+    _id: row.id,
+       purchase_order_id: row.purchase_order_id,
+    po: row.purchase_orders?.code || '',
+    supplier: row.suppliers?.name || '',
+    date: fmt(row.expected_date),
+    items: row.items || '',
+    qty: Number(row.qty) || 0,
+    actualReceived: row.actual_received_qty,
+    accepted: row.accepted_qty,
+    damaged: row.damaged_qty,
+    missing: row.missing_qty,
+    inspectionNotes: row.inspection_notes || '',
+    status: row.status
+}));
 
     D.disc = (discrepancies || []).map(row => ({
         id: row.code,
@@ -1012,6 +1019,8 @@ function inspect(id) {
         return;
     }
 
+    const ordered = Number(delivery.qty) || 0;
+
     modal(`
         <h2>Inspect ${esc(delivery.id)}</h2>
 
@@ -1019,21 +1028,43 @@ function inspect(id) {
             ${esc(delivery.items)} from ${esc(delivery.supplier)}
         </p>
 
-        <label for="i1">Result</label>
+        <div class="card" style="margin:12px 0;padding:12px">
+            <div class="mut">Ordered Quantity</div>
+            <h2>${ordered} pcs</h2>
+        </div>
 
-        <select id="i1">
-            <option value="ok">
-                All items complete and in good condition
-            </option>
+        <label for="i-received">Actually Received</label>
+        <input
+            id="i-received"
+            type="number"
+            min="0"
+            max="${ordered}"
+            step="1"
+            value="${ordered}"
+        >
 
-            <option value="bad">
-                Missing or damaged items
-            </option>
-        </select>
+        <label for="i-damaged">Damaged Quantity</label>
+        <input
+            id="i-damaged"
+            type="number"
+            min="0"
+            max="${ordered}"
+            step="1"
+            value="0"
+        >
 
-        <label for="i2">Issue details (if any)</label>
+        <label for="i-notes">Inspection Notes</label>
+        <textarea
+            id="i-notes"
+            placeholder="Describe missing or damaged items, if any"
+        ></textarea>
 
-        <input id="i2" placeholder="Example: 3 rolls damaged">
+        <div class="card" style="margin-top:12px;padding:12px">
+            <div class="mut">Accepted quantity will be calculated automatically.</div>
+            <p id="inspection-preview" style="margin-bottom:0">
+                Accepted: ${ordered} pcs
+            </p>
+        </div>
 
         ${btns(
             cancel,
@@ -1042,6 +1073,19 @@ function inspect(id) {
             </button>`
         )}
     `);
+
+    const updatePreview = () => {
+        const received = Number($('#i-received').value) || 0;
+        const damaged = Number($('#i-damaged').value) || 0;
+        const accepted = received - damaged;
+        const missing = ordered - received;
+
+        $('#inspection-preview').textContent =
+            `Accepted: ${accepted} pcs · Damaged: ${damaged} pcs · Missing: ${missing} pcs`;
+    };
+
+    $('#i-received').addEventListener('input', updatePreview);
+    $('#i-damaged').addEventListener('input', updatePreview);
 }
 
 /* ==========================================
@@ -1085,86 +1129,92 @@ async function saveInspect(id) {
         return;
     }
 
-    const isBad = $('#i1').value === 'bad';
-    const issue = $('#i2').value.trim();
+    const ordered = Number(delivery.qty) || 0;
+    const actual = Number($('#i-received').value);
+    const damaged = Number($('#i-damaged').value);
+    const notes = $('#i-notes').value.trim();
 
-    if (isBad && !issue) {
-        toast('Describe the missing or damaged items.');
+    if (
+        !Number.isInteger(actual) ||
+        !Number.isInteger(damaged) ||
+        actual < 0 ||
+        damaged < 0 ||
+        actual > ordered ||
+        damaged > actual
+    ) {
+        toast('Please enter valid inspection quantities.');
         return;
     }
 
-    let error;
+    const accepted = actual - damaged;
+    const missing = ordered - actual;
+    const hasIssues = damaged > 0 || missing > 0;
 
-    if (isBad) {
-        error = await addIssue(delivery, issue);
-    } else {
-        const result = await sb
-            .from('deliveries')
-            .update({
-                status: 'Completed'
-            })
-            .eq('id', delivery._id);
-
-        error = result.error;
+    if (hasIssues && !notes) {
+        toast('Please provide inspection notes for missing or damaged items.');
+        return;
     }
+    // Update the related Purchase Order status
+const { error: poError } = await sb
+    .from('purchase_orders')
+    .update({ status: 'Received' })
+    .eq('id', delivery.purchase_order_id);
+
+if (poError) {
+    console.error('PO status update failed:', poError);
+    toast('Inspection saved, but PO status update failed: ' + poError.message);
+}
+
+    const saveButton = document.querySelector('#layer .pri');
+    if (saveButton) saveButton.disabled = true;
+
+    const { error } = await sb
+        .from('deliveries')
+        .update({
+            actual_received_qty: actual,
+            accepted_qty: accepted,
+            damaged_qty: damaged,
+            missing_qty: missing,
+            inspection_notes: notes || null,
+            inspected_by: ME.id,
+            inspected_at: new Date().toISOString(),
+            status: hasIssues ? 'With Issues' : 'Completed'
+        })
+        .eq('id', delivery._id);
 
     if (error) {
         console.error('Inspection error:', error);
-        toast('Could not save: ' + error.message);
+        if (saveButton) saveButton.disabled = false;
+        toast('Could not save inspection: ' + error.message);
         return;
+    }
+
+    if (hasIssues) {
+        const issue = [
+            missing > 0 ? `${missing} missing` : '',
+            damaged > 0 ? `${damaged} damaged` : '',
+            notes
+        ].filter(Boolean).join(' — ');
+
+        const issueError = await addIssue(delivery, issue);
+
+        if (issueError) {
+            console.error('Discrepancy error:', issueError);
+            toast('Inspection saved, but discrepancy report failed: ' + issueError.message);
+        }
     }
 
     closeM();
+
     await load();
 
-    go(
-        'delivery',
-        isBad ? 'Discrepancies' : 'Inspection'
-    );
+    go('delivery', hasIssues ? 'Discrepancies' : 'Reports');
 
     toast(
-        isBad
-            ? 'Discrepancy reported.'
-            : 'Delivery completed. Coordinate stock-in with Inventory.'
+        hasIssues
+            ? `Inspection saved. ${accepted} pcs accepted; discrepancy reported.`
+            : `Inspection completed. ${accepted} pcs accepted.`
     );
-}
-
-/* ==========================================
-   REPORT DISCREPANCY
-========================================== */
-
-function reportD() {
-    const availableDeliveries = D.dels.filter(
-        delivery =>
-            !['Pending', 'Scheduled', 'Delayed'].includes(delivery.status)
-    );
-
-    if (!availableDeliveries.length) {
-        toast('There are no received deliveries to report.');
-        return;
-    }
-
-    modal(`
-        <h2>Report discrepancy</h2>
-
-        <label for="r1">Delivery</label>
-
-        <select id="r1">
-            ${availableDeliveries.map(delivery => `
-                <option value="${esc(delivery.id)}">
-                    ${esc(delivery.id)} - ${esc(delivery.supplier)}
-                </option>
-            `).join('')}
-        </select>
-
-        <label for="r2">Issue</label>
-        <input id="r2" placeholder="Missing or damaged items">
-
-        ${btns(
-            cancel,
-            '<button class="pri" onclick="saveD()">Report</button>'
-        )}
-    `);
 }
 
 async function saveD() {
