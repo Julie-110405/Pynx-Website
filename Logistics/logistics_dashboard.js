@@ -187,6 +187,32 @@ async function load() {
     ) {
         toast('Some data could not load. Check the browser console.');
     }
+    // Automatically mark overdue, unreceived deliveries as Delayed
+const today = new Date();
+const todayIso =
+    `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+
+const { data: delayedRows, error: delayedError } = await sb
+    .from('deliveries')
+    .update({ status: 'Delayed' })
+    .eq('status', 'Pending')
+    .is('received_date', null)
+    .lt('expected_date', todayIso)
+    .select('id');
+
+if (delayedError) {
+    console.error('Automatic delayed update failed:', delayedError);
+} else if (delayedRows?.length) {
+    const delayedIds = new Set(delayedRows.map(row => row.id));
+
+    (deliveries || []).forEach(row => {
+        if (delayedIds.has(row.id)) {
+            row.status = 'Delayed';
+        }
+    });
+
+    console.log('Overdue deliveries marked as Delayed:', delayedRows);
+}
 
    D.dels = (deliveries || []).map(row => ({
     id: row.code,
@@ -1121,11 +1147,18 @@ async function addIssue(delivery, issue) {
    SAVE INSPECTION
 ========================================== */
 
+
 async function saveInspect(id) {
     const delivery = find(id);
 
     if (!delivery) {
         toast('Delivery not found.');
+        return;
+    }
+
+    if (!delivery.purchase_order_id) {
+        toast('Purchase Order ID is missing for this delivery.');
+        console.error('Delivery record:', delivery);
         return;
     }
 
@@ -1154,68 +1187,90 @@ async function saveInspect(id) {
         toast('Please provide inspection notes for missing or damaged items.');
         return;
     }
-    // Update the related Purchase Order status
-const { error: poError } = await sb
+
+    
+const saveButton = document.querySelector('#layer .pri');
+if (saveButton) saveButton.disabled = true;
+
+// 1. Save the inspection to Logistics
+const { error } = await sb
+    .from('deliveries')
+    .update({
+        actual_received_qty: actual,
+        accepted_qty: accepted,
+        damaged_qty: damaged,
+        missing_qty: missing,
+        inspection_notes: notes || null,
+        inspected_by: ME.id,
+        inspected_at: new Date().toISOString(),
+        status: hasIssues ? 'With Issues' : 'Completed'
+    })
+    .eq('id', delivery._id);
+
+if (error) {
+    console.error('Inspection error:', error);
+    if (saveButton) saveButton.disabled = false;
+    toast('Could not save inspection: ' + error.message);
+    return;
+}
+
+// 2. Determine Purchase Order status
+const poStatus = hasIssues
+    ? 'Received with Issues'
+    : 'Received';
+
+// 3. Update the related Purchase Order
+const { data: updatedPO, error: poError } = await sb
     .from('purchase_orders')
-    .update({ status: 'Received' })
-    .eq('id', delivery.purchase_order_id);
+    .update({ status: poStatus })
+    .eq('id', delivery.purchase_order_id)
+    .select('id, code, status');
 
 if (poError) {
-    console.error('PO status update failed:', poError);
-    toast('Inspection saved, but PO status update failed: ' + poError.message);
+    console.error('Purchase Order status error:', poError);
+    if (saveButton) saveButton.disabled = false;
+    toast('Inspection saved, but PO update failed: ' + poError.message);
+    return;
 }
 
-    const saveButton = document.querySelector('#layer .pri');
-    if (saveButton) saveButton.disabled = true;
-
-    const { error } = await sb
-        .from('deliveries')
-        .update({
-            actual_received_qty: actual,
-            accepted_qty: accepted,
-            damaged_qty: damaged,
-            missing_qty: missing,
-            inspection_notes: notes || null,
-            inspected_by: ME.id,
-            inspected_at: new Date().toISOString(),
-            status: hasIssues ? 'With Issues' : 'Completed'
-        })
-        .eq('id', delivery._id);
-
-    if (error) {
-        console.error('Inspection error:', error);
-        if (saveButton) saveButton.disabled = false;
-        toast('Could not save inspection: ' + error.message);
-        return;
-    }
-
-    if (hasIssues) {
-        const issue = [
-            missing > 0 ? `${missing} missing` : '',
-            damaged > 0 ? `${damaged} damaged` : '',
-            notes
-        ].filter(Boolean).join(' — ');
-
-        const issueError = await addIssue(delivery, issue);
-
-        if (issueError) {
-            console.error('Discrepancy error:', issueError);
-            toast('Inspection saved, but discrepancy report failed: ' + issueError.message);
-        }
-    }
-
-    closeM();
-
-    await load();
-
-    go('delivery', hasIssues ? 'Discrepancies' : 'Reports');
-
-    toast(
-        hasIssues
-            ? `Inspection saved. ${accepted} pcs accepted; discrepancy reported.`
-            : `Inspection completed. ${accepted} pcs accepted.`
-    );
+if (!updatedPO || updatedPO.length === 0) {
+    console.error('No Purchase Order row was updated.');
+    if (saveButton) saveButton.disabled = false;
+    toast('Inspection saved, but PO was not updated.');
+    return;
 }
+
+console.log('Purchase Order successfully updated:', updatedPO[0]);
+
+// 4. Create discrepancy record if necessary
+if (hasIssues) {
+    const issue = [
+        missing > 0 ? `${missing} missing` : '',
+        damaged > 0 ? `${damaged} damaged` : '',
+        notes
+    ].filter(Boolean).join(' — ');
+
+    const issueError = await addIssue(delivery, issue);
+
+    if (issueError) {
+        console.error('Discrepancy error:', issueError);
+        toast('Inspection saved, but discrepancy report failed: ' + issueError.message);
+    }
+}
+
+// 5. Finish
+closeM();
+await load();
+go('delivery', hasIssues ? 'Discrepancies' : 'Reports');
+
+toast(
+    hasIssues
+        ? `Inspection saved. ${accepted} pcs accepted; discrepancy reported.`
+        : `Inspection completed. ${accepted} pcs accepted.`
+);
+}
+
+
 
 async function saveD() {
     const id = $('#r1').value;

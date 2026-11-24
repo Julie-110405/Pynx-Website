@@ -376,9 +376,28 @@
         get('delivery_discrepancies', '*', q => q.order('created_at', { ascending: false }))]);
       const sname = {}, pcode = {}, dcode = {}; sups.forEach(s => { sname[s.id] = s.name; }); pos.forEach(p => { pcode[p.id] = p.code; });
       dels.forEach(d => { dcode[d.id] = d.code; });
-      delRows = dels.map(d => ({ code: d.code, supplier: sname[d.supplier_id] || '–', po: pcode[d.purchase_order_id] || '–', items: d.items || '–',
-        qty: d.qty, expected: d.expected_date, received: d.received_date, status: d.status }));
-      const today = todayIso(), week = addDays(today, 6), inc = dels.filter(d => INCOMING.includes(d.status));
+  const today = todayIso();
+
+delRows = dels.map(d => {
+    const isOverdue =
+        INCOMING.includes(d.status) &&
+        d.expected_date &&
+        d.expected_date < today;
+
+    return {
+        code: d.code,
+        supplier: sname[d.supplier_id] || '–',
+        po: pcode[d.purchase_order_id] || '–',
+        items: d.items || '–',
+        qty: d.qty,
+        expected: d.expected_date,
+        received: d.received_date,
+        status: isOverdue ? 'Delayed' : d.status
+    };
+});
+
+const week = addDays(today, 6);
+const inc = dels.filter(d => INCOMING.includes(d.status));
       metric(sec, 0, 'Incoming', inc.length, 'Pending, scheduled or delayed');
       metric(sec, 1, 'Expected This Week', inc.filter(d => d.expected_date && d.expected_date >= today && d.expected_date <= week).length, `${fd(today)} – ${fd(week)}`);
       metric(sec, 2, 'Delayed', inc.filter(d => d.status === 'Delayed' || (d.expected_date && d.expected_date < today)).length, 'Delayed or past expected date');
