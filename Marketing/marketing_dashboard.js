@@ -2,7 +2,7 @@
    PYNX ERP — Marketing (one script for all menus)
    Menus: Dashboard, Requisition, Project Designs, Products & Materials,
           Request History, Notifications, Log Out
-   Data:  Supabase (marketing_* tables, inventory_products, storage bucket)
+   Data:  Supabase (marketing_* tables, purchasing_requests, inventory_products, storage bucket)
    Sections: 1 Settings · 2 Helpers · 3 Data · 4 Live updates · 5 Sidebar
              6 Dashboard · 7 Requisition · 8 Project Designs · 9 Products
              10 Request History · 11 Notifications · 12 Start-up
@@ -25,7 +25,9 @@
   const MAX_FILE_BYTES = 10 * 1024 * 1024;
   const MAX_COVER_BYTES = 5 * 1024 * 1024;
   const PROJECT_OTHER = "Departmental / Daily Use";
-  const DESIGN_CATEGORIES = ["Clothing Collection", "Branding", "Packaging", "Marketing Materials"];
+  const DEFAULT_CATEGORIES = ["Cups", "Bikini"];   // starting categories; staff can type new ones
+  const DEPT_FROM = "Marketing Department";
+  const LOW_STYLE = ' style="color:#b03030;font-weight:700"';
 
   const MENU = [
     { key: "dashboard",     label: "Dashboard" },
@@ -49,7 +51,7 @@
   const state = {
     userId: null, profile: null,
     catalog: [], catalogError: "",
-    requisitions: [], designs: [], notifications: [],
+    requisitions: [], designs: [], notifications: [], purchasing: [],
     settings: { projectNotifications: true }
   };
   const urlCache = {};
@@ -60,11 +62,13 @@
   let lastSig = "";
   let pendingRender = false;
   let liveTimer = null;
+  let onSynced = null;                     // lets an open project window refresh its stock numbers
 
   /* ======================================================================
      2. HELPERS
      ====================================================================== */
   const $id = id => document.getElementById(id);
+  const norm = s => String(s == null ? "" : s).trim().toLowerCase();
 
   const esc = v => String(v == null ? "" : v).replace(/[&<>"']/g, c => (
     { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
@@ -98,12 +102,17 @@
   const uid = () => (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2);
   const ext = name => { const i = name.lastIndexOf("."); return i > -1 ? name.slice(i + 1, i + 5).toUpperCase() : "FILE"; };
   const initials = name => name.split(" ").slice(0, 2).map(w => w.charAt(0)).join("").toUpperCase();
+  const plural = (n, word) => n + " " + word + (n === 1 ? "" : "s");
+  const deptLabel = d => norm(d) === "procurement" ? "Purchasing" : String(d || "Unknown");
 
   const REQ_BADGE = { Pending: "badge-yellow", Approved: "badge-green", Rejected: "badge-red", Completed: "badge-blue", Partial: "badge-yellow" };
   const statusBadge = s => `<span class="badge ${REQ_BADGE[s] || "badge-blue"}">${esc(s)}</span>`;
-  const designBadge = s => `<span class="badge ${s === "Completed" ? "badge-green" : "badge-yellow"}">${esc(s)}</span>`;
+  const DESIGN_BADGE = { Ongoing: "badge-yellow", Approved: "badge-blue", Completed: "badge-green" };
+  const designBadge = s => `<span class="badge ${DESIGN_BADGE[s] || "badge-yellow"}">${esc(s)}</span>`;
+  const pill = t => `<span class="badge ${t.badge}">${esc(t.label)}</span>`;
   const stockBadge = s => s === "out" ? '<span class="badge badge-red">Out of Stock</span>'
-    : s === "low" ? '<span class="badge badge-yellow">Low Stock</span>' : '<span class="badge badge-green">In Stock</span>';
+    : s === "low" ? '<span class="badge badge-red">Low Stock</span>' : '<span class="badge badge-green">In Stock</span>';
+  const stockStyle = s => s === "ok" ? "" : LOW_STYLE;
   const bar = pct => `<div class="bar-track"><div class="bar-fill" style="width:${Math.max(0, Math.min(100, pct))}%"></div></div>`;
 
   function toast(msg, type) {
@@ -152,6 +161,30 @@
     });
   }
 
+  /* Permanent-delete warning: the red button stays off until the project name is typed */
+  function confirmDeleteProject(p) {
+    return new Promise(resolve => {
+      let done = false;
+      const m = modal(
+        `<h2 class="modal-title">Delete this project permanently?</h2>
+         <div class="remark remark-bad"><b>Warning:</b> This cannot be undone. Once deleted, the project can never be recovered.</div>
+         <p class="modal-text">You are about to delete <b>${esc(p.name)}</b> (${esc(p.id)}). Its ${plural(p.materials.length, "product")}, ${plural(p.files.length, "file")} and cover photo will be removed for good. Past requisitions keep their records.</p>
+         <div class="field" style="margin-top:14px"><label>Type <b>${esc(p.name)}</b> to confirm</label>
+           <input type="text" id="delConfirm" autocomplete="off" placeholder="Project name"></div>
+         <div class="modal-actions"><button type="button" class="btn btn-light" data-close>Cancel</button>
+           <button type="button" class="btn btn-danger" id="delYes" disabled>Delete permanently</button></div>`,
+        { onClose: () => { if (!done) { done = true; resolve(false); } } });
+      const input = m.querySelector("#delConfirm");
+      const yes = m.querySelector("#delYes");
+      input.addEventListener("input", () => { yes.disabled = norm(input.value) !== norm(p.name); });
+      yes.addEventListener("click", () => {
+        if (norm(input.value) !== norm(p.name)) return;
+        done = true; m.close(); resolve(true);
+      });
+      input.focus();
+    });
+  }
+
   function downloadCSV(filename, rows) {
     const csv = rows.map(r => r.map(c => '"' + String(c == null ? "" : c).replace(/"/g, '""') + '"').join(",")).join("\r\n");
     const a = document.createElement("a");
@@ -182,13 +215,20 @@
   /* ======================================================================
      3. DATA (Supabase)
      ====================================================================== */
-  const product = name => state.catalog.find(p => p.name === name) || null;
+  const product = name => state.catalog.find(p => norm(p.name) === norm(name)) || null;
+  const productFor = x => state.catalog.find(p => x.sku && p.sku === x.sku) || product(x.name);
   const productStatus = p => p.stock <= 0 ? "out" : p.stock <= p.min ? "low" : "ok";
   const unitOf = name => (product(name) || {}).unit || "pcs";
   const unreadCount = () => state.notifications.filter(n => !n.read).length;
   const requisitions = () => state.requisitions;
   const getRequisition = id => state.requisitions.find(r => r.id === id) || null;
   const getDesign = id => state.designs.find(d => d.id === id) || null;
+
+  const categoryList = () => {
+    const out = DEFAULT_CATEGORIES.slice();
+    state.designs.forEach(d => { if (d.category && !out.some(c => norm(c) === norm(d.category))) out.push(d.category); });
+    return out;
+  };
 
   const releasedSummary = r => r.items.filter(i => i.released > 0).map(i => fmtNum(i.released) + " of " + fmtNum(i.qty) + " " + i.unit).join("; ");
   const materialLabel = r => !r.items.length ? "—" : r.items[0].name + (r.items.length > 1 ? " +" + (r.items.length - 1) + " more" : "");
@@ -213,9 +253,54 @@
   const designStats = () => ({
     total: state.designs.length,
     ongoing: state.designs.filter(p => p.status === "Ongoing").length,
-    completed: state.designs.filter(p => p.status === "Completed").length,
-    files: state.designs.reduce((a, p) => a + p.files.length, 0)
+    approved: state.designs.filter(p => p.status === "Approved").length,
+    completed: state.designs.filter(p => p.status === "Completed").length
   });
+
+  /* Purchasing progress of one design project */
+  function designPurch(id) {
+    const rows = state.purchasing.filter(r => r.designId === id);
+    return {
+      rows,
+      requested: rows.filter(r => r.status === "Requested").length,
+      purchased: rows.filter(r => r.status === "Purchased").length,
+      inInv: rows.filter(r => r.status === "Purchased" && r.inInventory).length
+    };
+  }
+
+  /* Where a design project is in the Admin -> Inventory -> Purchasing flow */
+  function designTrack(d) {
+    const approved = d.status !== "Ongoing";
+    const admin = approved ? { badge: "badge-green", label: "Approved", note: d.adminRemarks || "Approved by Admin" }
+      : d.returned ? { badge: "badge-red", label: "Returned", note: d.adminRemarks || "Revise the project and resubmit." }
+      : { badge: "badge-yellow", label: "Pending", note: "Sent by the " + (d.submittedFrom || DEPT_FROM) + " · waiting for Admin approval" };
+    let inv, pur;
+    if (!approved) {
+      inv = { badge: "badge-blue", label: "Not started", note: "Starts after Admin approves" };
+      pur = { badge: "badge-blue", label: "—", note: "" };
+    } else {
+      if (d.inventoryCheck === "Available") {
+        inv = { badge: "badge-green", label: "Available", note: "Inventory has all the products" };
+        pur = { badge: "badge-blue", label: "Not needed", note: "Everything is in stock" };
+      } else if (d.inventoryCheck === "Unavailable") {
+        inv = { badge: "badge-red", label: "Not available", note: "Some products are not in stock" };
+        if (!d.sentToPurchasing) {
+          pur = { badge: "badge-red", label: "Not yet sent", note: "Not yet passed to Purchasing" };
+        } else {
+          const pp = designPurch(d.id);
+          if (!pp.rows.length) pur = { badge: "badge-yellow", label: "Sent to Purchasing", note: "Inventory passed the request to Purchasing" };
+          else if (!pp.purchased) pur = { badge: "badge-yellow", label: "Requested", note: "Waiting for Purchasing to buy the products" };
+          else if (pp.purchased < pp.rows.length) pur = { badge: "badge-yellow", label: "Partly purchased", note: pp.purchased + " of " + pp.rows.length + " products purchased" };
+          else if (pp.inInv === pp.rows.length) pur = { badge: "badge-green", label: "Purchased · In Inventory", note: "Everything was bought and is already in Inventory" };
+          else pur = { badge: "badge-yellow", label: "Purchased · Not in Inventory", note: "Bought by Purchasing, waiting to arrive in Inventory" };
+        }
+      } else {
+        inv = { badge: "badge-yellow", label: "Checking", note: "Inventory is checking stock" };
+        pur = { badge: "badge-blue", label: "—", note: "" };
+      }
+    }
+    return { admin, inv, pur };
+  }
 
   const mapReq = r => ({
     id: r.id, createdAt: r.created_at, updatedAt: r.updated_at, project: r.project, reason: r.reason,
@@ -228,11 +313,17 @@
   const mapDesign = d => ({
     id: d.id, name: d.name, category: d.category, status: d.status, progress: d.progress,
     description: d.description || "", requirements: d.requirements || "", coverPath: d.cover_path || "",
+    returned: !!d.returned, adminRemarks: d.admin_remarks || "",
+    inventoryCheck: d.inventory_check || "Waiting", sentToPurchasing: !!d.sent_to_purchasing,
+    submittedFrom: d.submitted_from || DEPT_FROM,
     createdAt: d.created_at, updatedAt: d.updated_at,
     materials: (d.materials || []).slice().sort((a, b) => a.id - b.id).map(m => ({ name: m.material_name, sku: m.sku, unit: m.unit, qty: Number(m.qty) })),
     files: (d.files || []).slice().sort((a, b) => a.id - b.id).map(f => ({ name: f.file_name, size: Number(f.file_size), type: f.file_type, path: f.storage_path }))
   });
-  const mapNotif = n => ({ id: n.id, text: n.message, source: n.source, tone: n.tone, kind: n.kind, reqId: n.req_id, read: n.is_read, at: n.created_at });
+  const mapNotif = n => ({ id: n.id, text: n.message, source: n.source, tone: n.tone, kind: n.kind, reqId: n.req_id, designId: n.design_id, refSku: n.ref_sku, read: n.is_read, at: n.created_at });
+  const mapPurch = r => ({
+    id: r.id, designId: r.design_id, requestedBy: deptLabel(r.requested_by), product: r.product_name, sku: r.sku || "",
+    unit: r.unit, qty: Number(r.qty), status: r.status, inInventory: !!r.in_inventory, createdAt: r.created_at, updatedAt: r.updated_at });
 
   /* Private photo links (signed, cached) */
   async function ensureUrls(paths) {
@@ -246,12 +337,15 @@
   const urlOf = p => (p && urlCache[p] && urlCache[p].url) || "";
 
   async function loadData() {
-    const [c, r, d, n, s] = await Promise.all([
+    try { await sb.rpc("marketing_refresh_alerts"); } catch (err) { console.warn("[alerts]", err); }
+
+    const [c, r, d, n, s, pr] = await Promise.all([
       sb.from("inventory_products").select("sku,name,category,unit,qty,min_level,supplier,location").eq("archived", false).order("name"),
       sb.from("marketing_requisitions").select("*, items:marketing_requisition_items(*), events:marketing_requisition_events(*)").order("created_at", { ascending: false }),
       sb.from("marketing_designs").select("*, materials:marketing_design_materials(*), files:marketing_design_files(*)").order("updated_at", { ascending: false }),
       sb.from("marketing_notifications").select("*").order("created_at", { ascending: false }).limit(200),
-      sb.from("marketing_settings").select("project_notifications").eq("user_id", state.userId).maybeSingle()
+      sb.from("marketing_settings").select("project_notifications").eq("user_id", state.userId).maybeSingle(),
+      sb.from("purchasing_requests").select("*").order("created_at", { ascending: false })
     ]);
     if (r.error) throw r.error;
     if (d.error) throw d.error;
@@ -263,12 +357,13 @@
       supplier: p.supplier || "", location: p.location || "" }));
     state.requisitions = (r.data || []).map(mapReq);
     state.designs = (d.data || []).map(mapDesign);
-    state.notifications = (n.data || []).map(mapNotif);
+    state.purchasing = pr.error ? [] : (pr.data || []).map(mapPurch);
     state.settings.projectNotifications = s.data ? s.data.project_notifications : true;
+    state.notifications = (n.data || []).map(mapNotif).filter(x => state.settings.projectNotifications || !x.designId);
     await ensureUrls(state.designs.map(x => x.coverPath));
   }
 
-  const sigOf = () => JSON.stringify([state.requisitions, state.designs, state.notifications, state.catalog, state.settings]);
+  const sigOf = () => JSON.stringify([state.requisitions, state.designs, state.notifications, state.catalog, state.purchasing, state.settings]);
 
   /* Loads everything; announce = show a pop-up for brand-new notifications. Returns true if anything changed */
   async function syncData(announce) {
@@ -295,6 +390,10 @@
   }
   async function demoStep(id, action) {
     const { error } = await sb.rpc("marketing_demo_step", { p_req: id, p_action: action });
+    if (error) throw error;
+  }
+  async function demoDesignStep(id, action) {
+    const { error } = await sb.rpc("marketing_demo_design_step", { p_design: id, p_action: action });
     if (error) throw error;
   }
   async function saveDesignRpc(payload) {
@@ -334,13 +433,14 @@
   }
 
   /* ======================================================================
-     4. LIVE UPDATES (notifications arrive without refreshing)
+     4. LIVE UPDATES (notifications and stock arrive without refreshing)
      ====================================================================== */
   function liveRefresh() {
     clearTimeout(liveTimer);
     liveTimer = setTimeout(async () => {
       try {
         const changed = await syncData(true);
+        if (onSynced) onSynced();
         if (!changed) return;
         if (document.querySelector(".modal-backdrop") || isTyping()) pendingRender = true;
         else render(true);
@@ -352,6 +452,9 @@
     sb.channel("marketing-live")
       .on("postgres_changes", { event: "*", schema: "public", table: "marketing_notifications" }, liveRefresh)
       .on("postgres_changes", { event: "*", schema: "public", table: "marketing_requisitions" }, liveRefresh)
+      .on("postgres_changes", { event: "*", schema: "public", table: "marketing_designs" }, liveRefresh)
+      .on("postgres_changes", { event: "*", schema: "public", table: "purchasing_requests" }, liveRefresh)
+      .on("postgres_changes", { event: "*", schema: "public", table: "inventory_products" }, liveRefresh)
       .subscribe();
     setInterval(() => { if (!document.hidden) liveRefresh(); }, POLL_MS);
     document.addEventListener("visibilitychange", () => { if (!document.hidden) liveRefresh(); });
@@ -449,7 +552,7 @@
 
   function pageDashboard(view) {
     const s = summary(), ds = designStats();
-    const maxD = Math.max(ds.ongoing, ds.completed, 1);
+    const maxD = Math.max(ds.ongoing, ds.approved, ds.completed, 1);
     const notifs = state.notifications.slice(0, 4);
     const updates = requisitions().slice().sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)).slice(0, 4);
     const dateText = new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
@@ -475,7 +578,8 @@
 
         <article class="card card-lg">
           <h2 class="card-title">Design Projects</h2>
-          <div class="bar-item"><div class="bar-label"><span>Ongoing</span><strong>${ds.ongoing}</strong></div>${bar(ds.ongoing / maxD * 100)}</div>
+          <div class="bar-item"><div class="bar-label"><span>Ongoing (waiting for Admin)</span><strong>${ds.ongoing}</strong></div>${bar(ds.ongoing / maxD * 100)}</div>
+          <div class="bar-item"><div class="bar-label"><span>Approved</span><strong>${ds.approved}</strong></div>${bar(ds.approved / maxD * 100)}</div>
           <div class="bar-item"><div class="bar-label"><span>Completed</span><strong>${ds.completed}</strong></div>${bar(ds.completed / maxD * 100)}</div>
           <a class="link-more" href="#designs">View all projects &rarr;</a>
         </article>
@@ -530,7 +634,7 @@
   let submitting = false;
 
   function projectOptions(selected) {
-    const list = state.designs.slice().sort((a, b) => (a.status === "Ongoing" ? 0 : 1) - (b.status === "Ongoing" ? 0 : 1) || a.name.localeCompare(b.name));
+    const list = state.designs.slice().sort((a, b) => (a.status === "Completed" ? 1 : 0) - (b.status === "Completed" ? 1 : 0) || a.name.localeCompare(b.name));
     const names = list.map(p => p.name);
     const opt = (v, l, sel) => `<option value="${esc(v)}"${sel ? " selected" : ""}>${esc(l)}</option>`;
     let html = '<option value="">— Select project / purpose —</option><optgroup label="Design projects">';
@@ -544,6 +648,7 @@
     if (!p) return { unit: "", hint: "", warn: false };
     if (p.stock <= 0) return { unit: p.unit, hint: "Out of stock right now — Inventory will need to restock before this can be released.", warn: true };
     if (Number(r.qty) > p.stock) return { unit: p.unit, hint: "Only " + fmtNum(p.stock) + " " + p.unit + " in stock. You can still submit; Inventory will check what can be released.", warn: true };
+    if (p.stock <= p.min) return { unit: p.unit, hint: "Low stock: " + fmtNum(p.stock) + " " + p.unit + " left.", warn: true };
     return { unit: p.unit, hint: fmtNum(p.stock) + " " + p.unit + " available", warn: false };
   }
 
@@ -559,6 +664,22 @@
         ${r.status === "Rejected" ? `<div class="remark remark-bad"><b>Admin remarks:</b> ${esc(r.remarks || "No remarks provided.")}</div>
           <button type="button" class="btn btn-light btn-sm" data-resubmit="${r.id}">Revise &amp; resubmit</button>` : ""}
       </li>`).join("") + "</ul>";
+  }
+
+  /* Status of every design project: Admin approval -> Inventory -> Purchasing */
+  function designRequestRows() {
+    if (!state.designs.length) return '<tr><td colspan="5" class="empty-state">No design projects yet.</td></tr>';
+    return state.designs.slice().sort((a, b) =>
+      (a.status === "Completed" ? 1 : 0) - (b.status === "Completed" ? 1 : 0) || new Date(b.updatedAt) - new Date(a.updatedAt))
+      .map(d => {
+        const t = designTrack(d);
+        return `<tr class="row-link" data-design="${esc(d.id)}">
+          <td><strong>${esc(d.name)}</strong><span class="cell-sub">${esc(d.id)} · ${esc(d.category)} · ${esc(d.submittedFrom)}</span></td>
+          <td>${plural(d.materials.length, "product")}</td>
+          <td>${pill(t.admin)}<span class="cell-sub">${esc(t.admin.note)}</span></td>
+          <td>${pill(t.inv)}<span class="cell-sub">${esc(t.inv.note)}</span></td>
+          <td>${pill(t.pur)}<span class="cell-sub">${esc(t.pur.note)}</span></td></tr>`;
+      }).join("");
   }
 
   function pageRequisition(view) {
@@ -588,6 +709,14 @@
           </form></section>
         <section class="card"><h2 class="card-title">Open Requests</h2><div id="openRequests">${openRequestsHtml()}</div></section>
       </div>
+
+      <section class="section">
+        <div class="section-head"><h2>Project Design Requests</h2></div>
+        <p class="muted" style="margin:-6px 0 12px">Each design project is sent to Admin by the Marketing Department with all its products. Once approved it goes to Inventory, and to Purchasing if the products are not in stock.</p>
+        <div class="card table-card"><table class="table"><thead><tr>
+          <th>Project</th><th>Products</th><th>Admin approval</th><th>Inventory</th><th>Purchasing</th>
+          </tr></thead><tbody>${designRequestRows()}</tbody></table></div>
+      </section>
     </div>`;
 
     const root = view.querySelector(".page");
@@ -659,7 +788,7 @@
 
       confirmBox({
         title: "Submit requisition?",
-        message: `Send <b>${filled.length} material${filled.length > 1 ? "s" : ""}</b> for <b>${esc(form.project)}</b> to Admin for approval?`,
+        message: `Send <b>${filled.length} material${filled.length > 1 ? "s" : ""}</b> for <b>${esc(form.project)}</b> from the Marketing Department to Admin for approval?`,
         confirmText: "Submit"
       }).then(async ok => {
         if (!ok || submitting) return;
@@ -676,6 +805,8 @@
     root.addEventListener("click", e => {
       const re = e.target.closest("[data-resubmit]");
       if (re) { resubmit(re.dataset.resubmit); return; }
+      const dz = e.target.closest("[data-design]");
+      if (dz) { openDesign(dz.dataset.design); return; }
       const row = e.target.closest("[data-open]");
       if (row) openRequest(row.dataset.open);
     });
@@ -697,21 +828,30 @@
   function designMatches(p) {
     const q = dFilters.q.trim().toLowerCase();
     if (dFilters.status && p.status !== dFilters.status) return false;
-    if (dFilters.category && p.category !== dFilters.category) return false;
+    if (dFilters.category && norm(p.category) !== norm(dFilters.category)) return false;
     return !q || (p.name + " " + p.description + " " + p.category).toLowerCase().indexOf(q) !== -1;
   }
+
+  const lowProductCount = p => p.status === "Completed" ? 0 : p.materials.filter(x => {
+    const pr = productFor(x);
+    return pr && productStatus(pr) !== "ok";
+  }).length;
 
   function designCard(p) {
     const cover = urlOf(p.coverPath);
     const thumb = cover ? `<img src="${esc(cover)}" alt="" loading="lazy">` : `<div class="thumb-ph">${esc(initials(p.name))}</div>`;
+    const hint = p.status === "Ongoing" ? (p.returned ? "Returned by Admin · revise and resubmit" : "Sent by the " + p.submittedFrom + " · waiting for Admin approval") : "";
+    const low = lowProductCount(p);
     return `<article class="design-card" data-open="${p.id}">
       <div class="design-thumb">${thumb}</div>
       <div class="design-body">
         <div class="design-top"><span class="tag">${esc(p.category)}</span>${designBadge(p.status)}</div>
         <h3>${esc(p.name)}</h3>
         <p class="muted clamp">${esc(p.description || "No description yet.")}</p>
+        ${hint ? `<p class="${p.returned ? "design-warn" : "muted"}" style="margin:-6px 0 10px;font-size:12px">${esc(hint)}</p>` : ""}
+        ${low ? `<p class="design-warn" style="margin:-4px 0 10px;font-size:12px">&#9888; ${plural(low, "product")} low in stock</p>` : ""}
         <div class="bar-label"><span>Progress</span><strong>${p.progress}%</strong></div>${bar(p.progress)}
-        <p class="muted design-meta">${p.materials.length} material${p.materials.length === 1 ? "" : "s"} · ${p.files.length} file${p.files.length === 1 ? "" : "s"} · Updated ${fmtDate(p.updatedAt)}</p>
+        <p class="muted design-meta">${plural(p.materials.length, "product")} · ${plural(p.files.length, "file")} · Updated ${fmtDate(p.updatedAt)}</p>
       </div></article>`;
   }
 
@@ -719,17 +859,17 @@
     const st = designStats();
     view.innerHTML = `
     <div class="page">
-      <header class="page-header page-header-row"><div><h1>Project Designs</h1><p>Plan creative projects, keep design files in one place and list the materials each project needs.</p></div>
+      <header class="page-header page-header-row"><div><h1>Project Designs</h1><p>Plan and track your business' product designs here, then send the whole design, with its products, to Admin for approval.</p></div>
         <button type="button" class="btn btn-dark" id="newProject">+ New Project</button></header>
-      <section class="grid grid-4">${[["Total Projects", st.total, "All design projects"], ["Ongoing", st.ongoing, "Currently in progress"],
-        ["Completed", st.completed, "Finished projects"], ["Design Files", st.files, "Files and references"]].map(c =>
+      <section class="grid grid-4">${[["Total Projects", st.total, "All design projects"], ["Ongoing", st.ongoing, "Waiting for Admin approval"],
+        ["Approved", st.approved, "Approved, not yet made"], ["Completed", st.completed, "Product is made"]].map(c =>
         `<article class="stat-card"><p class="stat-label">${c[0]}</p><p class="stat-value">${c[1]}</p><p class="stat-note">${c[2]}</p></article>`).join("")}</section>
       <div class="toolbar">
         <input type="text" id="dQ" class="search-input" placeholder="Search projects" value="${esc(dFilters.q)}">
         <select id="dStatus" class="select-input"><option value="">All statuses</option>
-          <option${dFilters.status === "Ongoing" ? " selected" : ""}>Ongoing</option><option${dFilters.status === "Completed" ? " selected" : ""}>Completed</option></select>
-        <select id="dCat" class="select-input"><option value="">All categories</option>${DESIGN_CATEGORIES.map(c =>
-          `<option${dFilters.category === c ? " selected" : ""}>${esc(c)}</option>`).join("")}</select>
+          ${["Ongoing", "Approved", "Completed"].map(s => `<option${dFilters.status === s ? " selected" : ""}>${s}</option>`).join("")}</select>
+        <select id="dCat" class="select-input"><option value="">All categories</option>${categoryList().map(c =>
+          `<option${norm(dFilters.category) === norm(c) ? " selected" : ""}>${esc(c)}</option>`).join("")}</select>
       </div>
       <section class="design-grid" id="designGrid"></section>
     </div>`;
@@ -748,7 +888,11 @@
     grid.addEventListener("click", e => { const c = e.target.closest("[data-open]"); if (c) openDesign(c.dataset.open); });
   }
 
-  const matPayload = m => { const p = product(m.name); return { sku: p ? p.sku : (m.sku || ""), name: m.name, unit: p ? p.unit : (m.unit || "pcs"), qty: Number(m.qty) }; };
+  const matPayload = m => {
+    const p = product(m.name);
+    return { sku: p ? p.sku : (m.sku || ""), name: p ? p.name : String(m.name || "").trim(),
+      unit: p ? p.unit : (String(m.unit || "").trim() || "pcs"), qty: Number(m.qty) };
+  };
   const designPayload = (d, over) => Object.assign({
     id: d.id, name: d.name, category: d.category, status: d.status, progress: d.progress,
     description: d.description, requirements: d.requirements, cover_path: d.coverPath || null,
@@ -756,22 +900,72 @@
     files: d.files.map(f => ({ name: f.name, size: f.size, type: f.type, path: f.path }))
   }, over || {});
 
+  function designSims(p) {
+    if (p.status === "Ongoing") return p.returned ? [] : [["approve", "Admin approves project"], ["return", "Admin returns project"]];
+    if (p.status === "Approved" && p.inventoryCheck === "Waiting") return [["has_stock", "Inventory has the products"], ["no_stock", "Inventory is short on stock"]];
+    if (p.inventoryCheck === "Unavailable" && !p.sentToPurchasing) return [["to_purchasing", "Inventory sends it to Purchasing"]];
+    if (p.sentToPurchasing) {
+      const pp = designPurch(p.id), out = [];
+      if (pp.requested) out.push(["purchased_in", "Purchasing bought it · now in Inventory"], ["purchased_out", "Purchasing bought it · not in Inventory yet"]);
+      if (pp.purchased > pp.inInv) out.push(["arrived", "Purchased products arrive in Inventory"]);
+      return out;
+    }
+    return [];
+  }
+
+  /* Product rows of a project: quantity needed, live stock from Inventory, and a red signal when low */
+  function designProductRows(p) {
+    if (!p.materials.length) return '<tr><td colspan="4" class="empty-state">No products listed.</td></tr>';
+    return p.materials.map(x => {
+      const pr = productFor(x);
+      if (!pr) {
+        return `<tr><td class="product">${esc(x.name)}</td><td class="right">${fmtNum(x.qty)} ${esc(x.unit)}</td>
+          <td class="right">—</td><td><span class="badge badge-blue">New product</span></td></tr>`;
+      }
+      const st = productStatus(pr);
+      const short = pr.stock < x.qty ? ' <span class="badge badge-red">Short by ' + fmtNum(x.qty - pr.stock) + "</span>" : "";
+      return `<tr><td class="product">${esc(x.name)}</td><td class="right">${fmtNum(x.qty)} ${esc(x.unit)}</td>
+        <td class="right"${stockStyle(st)}>${fmtNum(pr.stock)} ${esc(pr.unit)}</td><td>${stockBadge(st)}${short}</td></tr>`;
+    }).join("");
+  }
+  const trackRows = t => `
+    <tr><td class="product">Admin approval</td><td>${pill(t.admin)}</td><td>${esc(t.admin.note)}</td></tr>
+    <tr><td class="product">Inventory check</td><td>${pill(t.inv)}</td><td>${esc(t.inv.note)}</td></tr>
+    <tr><td class="product">Purchasing</td><td>${pill(t.pur)}</td><td>${esc(t.pur.note || "—")}</td></tr>`;
+  const stampText = () => "Stock comes live from Inventory · checked " + new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", second: "2-digit" });
+
   async function openDesign(id) {
+    try { await syncData(false); } catch (err) { console.warn(err); }
     const p = getDesign(id);
     if (!p) return;
     await ensureUrls(p.files.map(f => f.path));
     const cover = urlOf(p.coverPath);
+    const sims = DEMO_TOOLS ? designSims(p) : [];
+    let m = null;
 
-    const m = modal(`
+    const refreshStock = () => {
+      const cur = getDesign(id);
+      if (!cur || !m) return;
+      const rows = m.querySelector("#dpRows"), track = m.querySelector("#dpTrack"), stamp = m.querySelector("#dpStamp");
+      if (rows) rows.innerHTML = designProductRows(cur);
+      if (track) track.innerHTML = trackRows(designTrack(cur));
+      if (stamp) stamp.textContent = stampText();
+    };
+
+    m = modal(`
       ${cover ? `<div class="detail-cover"><img src="${esc(cover)}" alt="Cover photo"></div>` : ""}
-      <div class="modal-head"><div><h2 class="modal-title">${esc(p.name)}</h2><p class="muted">${esc(p.category)} · Updated ${fmtDate(p.updatedAt)}</p></div>${designBadge(p.status)}</div>
+      <div class="modal-head"><div><h2 class="modal-title">${esc(p.name)}</h2><p class="muted">${esc(p.id)} · ${esc(p.category)} · From ${esc(p.submittedFrom)} · Updated ${fmtDate(p.updatedAt)}</p></div>${designBadge(p.status)}</div>
       <div class="bar-label"><span>Progress</span><strong>${p.progress}%</strong></div>${bar(p.progress)}
+      ${p.returned ? `<div class="remark remark-bad" style="margin-top:14px"><b>Returned by Admin:</b> ${esc(p.adminRemarks || "Please revise and resubmit.")}</div>` : ""}
+
+      <h3 class="sub-title">Approval &amp; product tracking</h3>
+      <div class="table-scroll"><table class="table table-compact"><thead><tr><th>Step</th><th>Status</th><th>Details</th></tr></thead><tbody id="dpTrack">${trackRows(designTrack(p))}</tbody></table></div>
+
       <div class="detail-grid" style="margin-top:16px"><div class="full"><span>Description</span>${esc(p.description || "—")}</div>
-        <div class="full"><span>Design requirements</span>${esc(p.requirements || "—")}</div></div>
-      <h3 class="sub-title">Materials needed</h3>
-      ${p.materials.length ? `<div class="table-scroll"><table class="table table-compact"><thead><tr><th>Material</th><th class="right">Quantity</th></tr></thead><tbody>${
-        p.materials.map(x => `<tr><td class="product">${esc(x.name)}</td><td class="right">${fmtNum(x.qty)} ${esc(x.unit)}</td></tr>`).join("")}</tbody></table></div>`
-        : '<p class="muted">No materials listed.</p>'}
+        <div class="full"><span>Design Requirements / Materials needed</span>${esc(p.requirements || "—")}</div></div>
+      <h3 class="sub-title">Product Classification</h3>
+      <div class="table-scroll"><table class="table table-compact"><thead><tr><th>Product</th><th class="right">Quantity needed</th><th class="right">In stock now</th><th>Status</th></tr></thead><tbody id="dpRows">${designProductRows(p)}</tbody></table></div>
+      <p class="muted" id="dpStamp" style="margin-top:6px">${stampText()}</p>
       <h3 class="sub-title">Design files</h3>
       ${p.files.length ? '<div class="file-list">' + p.files.map(f => {
         const u = urlOf(f.path);
@@ -779,35 +973,43 @@
         const inner = `<div class="file-ico">${ico}</div><div class="file-info"><strong>${esc(f.name)}</strong><span>${fmtSize(f.size)}${u ? " · click to open" : ""}</span></div>`;
         return u ? `<a class="file-row" href="${esc(u)}" target="_blank" rel="noopener">${inner}</a>` : `<div class="file-row">${inner}</div>`;
       }).join("") + "</div>" : '<p class="muted">No files attached.</p>'}
+      ${sims.length ? `<div class="demo-box"><p><b>Demo tools</b> — pretend to be another department to see how this project moves forward. Remove when the Admin, Inventory and Purchasing pages are connected.</p>
+        <div class="demo-btns">${sims.map(s => `<button type="button" class="btn btn-light btn-sm" data-sim="${s[0]}">${s[1]}</button>`).join("")}</div></div>` : ""}
       <div class="modal-actions">
-        <button type="button" class="btn btn-light" data-delete>Delete</button>
-        <button type="button" class="btn btn-light" data-toggle>${p.status === "Completed" ? "Reopen project" : "Mark as completed"}</button>
-        <button type="button" class="btn btn-light" data-edit>Edit</button>
-        ${p.materials.length ? '<button type="button" class="btn btn-dark" data-request>Request these materials</button>' : ""}
+        <button type="button" class="btn btn-danger" data-delete>Delete</button>
+        ${p.status !== "Ongoing" ? `<button type="button" class="btn btn-light" data-toggle>${p.status === "Completed" ? "Set back to approved" : "Mark as completed"}</button>` : ""}
+        <button type="button" class="btn btn-light" data-edit>${p.returned ? "Edit &amp; resubmit" : "Edit"}</button>
         <button type="button" class="btn btn-light" data-close>Close</button>
-      </div>`, { wide: true });
+      </div>`, { wide: true, onClose: () => { if (onSynced === refreshStock) onSynced = null; } });
+    onSynced = refreshStock;
 
     m.addEventListener("click", async e => {
+      const sim = e.target.closest("[data-sim]");
+      if (sim) {
+        sim.disabled = true;
+        const ok = await act(async () => { await demoDesignStep(id, sim.dataset.sim); await reload(); }, "Project updated.");
+        if (ok) { m.close(); openDesign(id); } else sim.disabled = false;
+        return;
+      }
       if (e.target.closest("[data-edit]")) { m.close(); openDesignForm(id); }
-      else if (e.target.closest("[data-request]")) {
-        draft = { project: p.name, reason: "Materials for " + p.name + ".", items: p.materials.map(x => ({ name: x.name, qty: x.qty })) };
-        m.close(); go("requisition"); toast("Materials copied into a new requisition.");
-      } else if (e.target.closest("[data-toggle]")) {
-        const completing = p.status !== "Completed";
+      else if (e.target.closest("[data-toggle]")) {
+        const cur = getDesign(id) || p;
+        const completing = cur.status !== "Completed";
         await act(async () => {
-          await saveDesignRpc(designPayload(p, { status: completing ? "Completed" : "Ongoing", progress: completing ? 100 : 90 }));
+          await saveDesignRpc(designPayload(cur, { status: completing ? "Completed" : "Approved", progress: completing ? 100 : 90 }));
           m.close(); await reload();
         }, "Project status updated.");
       } else if (e.target.closest("[data-delete]")) {
-        const ok = await confirmBox({ title: "Delete project?", message: `Delete <b>${esc(p.name)}</b> and its files? Past requisitions keep their records.`, confirmText: "Delete", danger: true });
+        const cur = getDesign(id) || p;
+        const ok = await confirmDeleteProject(cur);
         if (!ok) return;
         await act(async () => {
           const { data, error } = await sb.from("marketing_designs").delete().eq("id", id).select("id");
           if (error) throw error;
           if (!data || !data.length) throw new Error("You do not have permission to delete this project.");
-          removeFiles([p.coverPath].concat(p.files.map(f => f.path)).filter(Boolean));
+          removeFiles([cur.coverPath].concat(cur.files.map(f => f.path)).filter(Boolean));
           m.close(); await reload();
-        }, "Project deleted.");
+        }, "Project deleted permanently.");
       }
     });
   }
@@ -846,17 +1048,27 @@
 
   function openDesignForm(id) {
     const existing = id ? getDesign(id) : null;
+    const locked = !!existing && existing.status !== "Ongoing";   // approved products cannot change
     const s = existing ? {
       name: existing.name, category: existing.category, status: existing.status, progress: existing.progress,
       description: existing.description, requirements: existing.requirements,
       materials: existing.materials.map(x => ({ name: x.name, qty: x.qty, sku: x.sku, unit: x.unit })),
       files: existing.files.map(f => ({ name: f.name, size: f.size, type: f.type, path: f.path })),
       cover: existing.coverPath ? { path: existing.coverPath, url: urlOf(existing.coverPath) } : null, removed: []
-    } : { name: "", category: DESIGN_CATEGORIES[0], status: "Ongoing", progress: 0, description: "", requirements: "",
-          materials: [], files: [], cover: null, removed: [] };
+    } : { name: "", category: "", status: "Ongoing", progress: 0, description: "", requirements: "",
+          materials: [{ name: "", qty: "" }], files: [], cover: null, removed: [] };
+
+    const saveLabel = !existing ? "Submit to Admin" : existing.returned ? "Save & resubmit" : "Save changes";
+    const statusField = locked
+      ? `<div class="field"><label>Status</label><select name="status">
+           <option value="Approved"${existing.status === "Approved" ? " selected" : ""}>Approved (in production)</option>
+           <option value="Completed"${existing.status === "Completed" ? " selected" : ""}>Completed (product is made)</option></select></div>`
+      : `<div class="field"><label>Status</label><input type="text" value="Ongoing — waiting for Admin approval" disabled></div>`;
 
     const m = modal(`
       <h2 class="modal-title">${existing ? "Edit Design Project" : "New Design Project"}</h2>
+      ${!existing ? `<div class="remark">The whole project — design details, files and every product below — is sent to Admin <b>from the ${DEPT_FROM}</b> for approval. Its status starts as <b>Ongoing</b> and changes to <b>Approved</b> once Admin approves.</div>` : ""}
+      ${existing && existing.returned ? `<div class="remark remark-bad"><b>Returned by Admin:</b> ${esc(existing.adminRemarks || "Please revise and resubmit.")}</div>` : ""}
       <form id="designForm" novalidate>
         <h3 class="sub-title" style="margin-top:6px">Cover photo</h3>
         <div class="cover-preview" id="dCover"></div>
@@ -867,22 +1079,28 @@
         <p class="muted" style="margin:6px 0 16px">JPG, PNG, WEBP or GIF · up to 5 MB. Shown on the project card.</p>
 
         <div class="form-grid">
-          <div class="field full"><label>Project name *</label><input type="text" name="pname" maxlength="80" value="${esc(s.name)}" placeholder="e.g. PYNX Summer Collection 2027"></div>
-          <div class="field"><label>Category *</label><select name="category">${DESIGN_CATEGORIES.map(c => `<option${c === s.category ? " selected" : ""}>${esc(c)}</option>`).join("")}</select></div>
-          <div class="field"><label>Status</label><select name="status"><option${s.status === "Ongoing" ? " selected" : ""}>Ongoing</option><option${s.status === "Completed" ? " selected" : ""}>Completed</option></select></div>
+          <div class="field full"><label>Project name *</label><input type="text" name="pname" maxlength="80" value="${esc(s.name)}" placeholder="e.g. Vintage Cup"></div>
+          <div class="field"><label>Category *</label>
+            <input type="text" name="category" list="catList" maxlength="40" autocomplete="off" placeholder="Choose or type a new category" value="${esc(s.category)}">
+            <datalist id="catList">${categoryList().map(c => `<option value="${esc(c)}"></option>`).join("")}</datalist>
+            <p class="muted" style="margin-top:4px">Type a new name to add it as a new category.</p></div>
+          ${statusField}
           <div class="field full"><label>Progress: <b id="progVal">${s.progress}%</b></label><input type="range" name="progress" min="0" max="100" step="5" value="${s.progress}"></div>
           <div class="field full"><label>Description</label><textarea name="description" rows="2">${esc(s.description)}</textarea></div>
-          <div class="field full"><label>Design requirements</label><textarea name="requirements" rows="2">${esc(s.requirements)}</textarea></div>
+          <div class="field full"><label>Design Requirements / Materials needed</label><textarea name="requirements" rows="2">${esc(s.requirements)}</textarea></div>
         </div>
-        <h3 class="sub-title">Materials needed</h3><div id="dMats"></div>
-        <button type="button" class="btn btn-light btn-sm" id="dAddMat">+ Add material</button>
+        <h3 class="sub-title">Product Classification</h3>
+        <datalist id="matList">${state.catalog.map(p => `<option value="${esc(p.name)}"></option>`).join("")}</datalist>
+        <div id="dMats"></div>
+        ${locked ? '<p class="muted" style="margin-top:8px">Products were approved by Admin and can no longer be edited.</p>'
+                 : '<button type="button" class="btn btn-light btn-sm" id="dAddMat">+ Add Product</button><p class="muted" style="margin-top:8px">Type any product. Names that are not in Inventory are listed as new design products.</p>'}
         <h3 class="sub-title">Design files &amp; references</h3><div class="file-list" id="dFiles"></div>
         <label class="btn btn-light btn-sm file-add">+ Add files<input type="file" id="dFileInput" multiple accept="image/*,.pdf,.svg,.ai,.psd,.zip,.doc,.docx" hidden></label>
         <input type="file" id="dReplaceInput" hidden>
         <p class="muted" style="margin-top:8px">Up to ${MAX_FILES} files, 10 MB each. Files are stored securely in your database.</p>
         <div class="form-error" id="dError" hidden></div>
         <div class="modal-actions"><button type="button" class="btn btn-light" data-close>Cancel</button>
-          <button type="submit" class="btn btn-dark" id="dSave">${existing ? "Save changes" : "Create project"}</button></div>
+          <button type="submit" class="btn btn-dark" id="dSave">${saveLabel}</button></div>
       </form>`, { wide: true });
 
     const f = m.querySelector("#designForm");
@@ -893,19 +1111,31 @@
     const coverRemove = m.querySelector("#dCoverRemove");
     let replaceIdx = -1;
 
+    const matHint = r => {
+      const p = product(r.name);
+      if (p) return "Existing product · " + fmtNum(p.stock) + " " + p.unit + " in stock" + (productStatus(p) !== "ok" ? " (low stock)" : "");
+      return String(r.name || "").trim() ? "New product · will be listed as a new design product" : "";
+    };
+
     function paintCover() {
       const url = s.cover ? (s.cover.objectUrl || s.cover.url) : "";
       coverEl.innerHTML = url ? `<img src="${esc(url)}" alt="Cover photo">` : '<span class="muted">No cover photo yet</span>';
       coverRemove.hidden = !s.cover;
     }
     function paintMats() {
-      matsEl.innerHTML = s.materials.length ? s.materials.map((r, i) => {
-        const p = product(r.name);
-        return `<div class="item-row" data-i="${i}">
-          <div class="field"><select class="row-material">${materialOptions(r.name)}</select></div>
-          <div class="field qty"><input type="number" class="row-qty" min="0" step="any" placeholder="Qty" value="${esc(r.qty || "")}"><span class="unit">${esc(p ? p.unit : (r.unit || ""))}</span></div>
-          <button type="button" class="icon-btn row-remove" title="Remove material">&times;</button></div>`;
-      }).join("") : '<p class="muted">No materials listed yet.</p>';
+      if (locked) {
+        matsEl.innerHTML = s.materials.length ? `<div class="table-scroll"><table class="table table-compact"><thead><tr><th>Product</th><th class="right">Quantity</th></tr></thead><tbody>${
+          s.materials.map(x => `<tr><td class="product">${esc(x.name)}</td><td class="right">${fmtNum(x.qty)}</td></tr>`).join("")}</tbody></table></div>`
+          : '<p class="muted">No products listed.</p>';
+        return;
+      }
+      matsEl.innerHTML = s.materials.length ? s.materials.map((r, i) =>
+        `<div class="item-row" data-i="${i}">
+          <div class="field"><input type="text" class="row-name" list="matList" autocomplete="off" placeholder="Type or choose a product" value="${esc(r.name)}"></div>
+          <div class="field"><input type="number" class="row-qty" min="0" step="any" placeholder="Qty" value="${esc(r.qty || "")}"></div>
+          <button type="button" class="icon-btn row-remove" title="Remove product">&times;</button>
+          <p class="row-hint">${esc(matHint(r))}</p></div>`).join("")
+        : '<p class="muted">No products listed yet.</p>';
     }
     function paintFiles() {
       filesEl.innerHTML = s.files.length ? s.files.map((fl, i) =>
@@ -935,18 +1165,27 @@
     });
 
     f.progress.addEventListener("input", () => { m.querySelector("#progVal").textContent = f.progress.value + "%"; });
-    f.status.addEventListener("change", () => {
-      if (f.status.value === "Completed") { f.progress.value = 100; m.querySelector("#progVal").textContent = "100%"; }
-    });
+    if (f.status && f.status.tagName === "SELECT") {
+      f.status.addEventListener("change", () => {
+        if (f.status.value === "Completed") { f.progress.value = 100; m.querySelector("#progVal").textContent = "100%"; }
+      });
+    }
 
-    m.querySelector("#dAddMat").addEventListener("click", () => { s.materials.push({ name: "", qty: "" }); paintMats(); });
-    matsEl.addEventListener("change", e => {
-      if (!e.target.classList.contains("row-material")) return;
-      const row = e.target.closest(".item-row"), p = product(e.target.value);
-      s.materials[+row.dataset.i].name = e.target.value;
-      row.querySelector(".unit").textContent = p ? p.unit : "";
+    const addMat = m.querySelector("#dAddMat");
+    if (addMat) addMat.addEventListener("click", () => { s.materials.push({ name: "", qty: "" }); paintMats(); });
+    matsEl.addEventListener("input", e => {
+      const row = e.target.closest(".item-row");
+      if (!row) return;
+      const i = +row.dataset.i;
+      if (e.target.classList.contains("row-name")) { s.materials[i].name = e.target.value; row.querySelector(".row-hint").textContent = matHint(s.materials[i]); }
+      else if (e.target.classList.contains("row-qty")) s.materials[i].qty = e.target.value;
     });
-    matsEl.addEventListener("input", e => { if (e.target.classList.contains("row-qty")) s.materials[+e.target.closest(".item-row").dataset.i].qty = e.target.value; });
+    matsEl.addEventListener("change", e => {
+      if (!e.target.classList.contains("row-name")) return;
+      const row = e.target.closest(".item-row"), i = +row.dataset.i, p = product(e.target.value);
+      if (p) { s.materials[i].name = p.name; e.target.value = p.name; }
+      row.querySelector(".row-hint").textContent = matHint(s.materials[i]);
+    });
     matsEl.addEventListener("click", e => { const b = e.target.closest(".row-remove"); if (b) { s.materials.splice(+b.closest(".item-row").dataset.i, 1); paintMats(); } });
 
     m.querySelector("#dFileInput").addEventListener("change", e => {
@@ -983,38 +1222,53 @@
     f.addEventListener("submit", async e => {
       e.preventDefault();
       const name = f.pname.value.trim();
+      let category = f.category.value.replace(/\s+/g, " ").trim();
       const errors = [];
       const add = msg => { if (errors.indexOf(msg) === -1) errors.push(msg); };
       if (name.length < 2) add("Enter the project name.");
-      else if (state.designs.some(p => p.id !== (existing && existing.id) && p.name.trim().toLowerCase() === name.toLowerCase())) add("Another project already uses this name.");
-      const seenMats = {};
-      s.materials.forEach(r => {
-        if (!r.name) add("Choose a material for every row (or remove the empty row).");
-        else {
-          if (seenMats[r.name]) add(r.name + " is listed more than once.");
-          seenMats[r.name] = true;
-          if (!(Number(r.qty) > 0)) add("Enter a quantity greater than zero for " + r.name + ".");
-        }
-      });
+      else if (state.designs.some(p => p.id !== (existing && existing.id) && norm(p.name) === norm(name))) add("Another project already uses this name.");
+      if (category.length < 2) add("Choose or type a category (at least 2 characters).");
+      else if (category.length > 40) add("The category name must be 40 characters or fewer.");
+      else {
+        const known = categoryList().filter(c => norm(c) === norm(category))[0];
+        if (known) category = known;
+      }
+
+      let mats = s.materials;
+      if (!locked) {
+        mats = s.materials.filter(r => String(r.name || "").trim() || r.qty);
+        if (!mats.length) add("Add at least one product.");
+        const seenMats = {};
+        mats.forEach(r => {
+          const nm = String(r.name || "").trim();
+          if (!nm) { add("Type a product name for every row (or remove the empty row)."); return; }
+          if (seenMats[norm(nm)]) add(nm + " is listed more than once.");
+          seenMats[norm(nm)] = true;
+          if (!(Number(r.qty) > 0)) add("Enter a quantity greater than zero for " + nm + ".");
+        });
+      }
       if (errors.length) { errEl.hidden = false; errEl.innerHTML = "<ul>" + errors.map(x => `<li>${esc(x)}</li>`).join("") + "</ul>"; return; }
       errEl.hidden = true;
 
-      s.name = name; s.category = f.category.value; s.status = f.status.value; s.progress = f.progress.value;
+      s.name = name; s.category = category;
+      s.status = locked ? f.status.value : "Ongoing";
+      s.progress = f.progress.value;
       s.description = f.description.value; s.requirements = f.requirements.value;
+      s.materials = mats;
 
       const btn = m.querySelector("#dSave");
       btn.disabled = true; btn.textContent = "Saving…";
       const ok = await act(async () => { await persistDesign(s, existing ? existing.id : null); });
-      if (!ok) { btn.disabled = false; btn.textContent = existing ? "Save changes" : "Create project"; return; }
+      if (!ok) { btn.disabled = false; btn.textContent = saveLabel; return; }
       m.close();
       await act(reload);
-      toast(existing ? "Project updated." : "Project created.");
+      toast(!existing ? "Project sent to Admin from the " + DEPT_FROM + " for approval." : existing.returned ? "Project resubmitted to Admin." : "Project updated.");
     });
     f.pname.focus();
   }
 
   /* ======================================================================
-     9. PRODUCTS & MATERIALS (read-only, from Inventory)
+     9. PRODUCTS & MATERIALS (live from Inventory + new design products)
      ====================================================================== */
   const pFilters = { q: "", category: "", avail: "", sort: "name-asc" };
 
@@ -1029,53 +1283,83 @@
     return list;
   }
 
+  /* Products typed in design projects that Inventory does not have yet */
+  function newDesignProducts() {
+    const rows = [];
+    state.designs.forEach(d => {
+      if (d.status === "Completed") return;
+      d.materials.forEach(x => {
+        if (!productFor(x)) rows.push({ name: x.name, qty: x.qty, project: d.name, status: d.status, designId: d.id });
+      });
+    });
+    return rows;
+  }
+
   function pageProducts(view) {
     const cats = state.catalog.map(p => p.category).filter((c, i, a) => a.indexOf(c) === i).sort();
     const count = s => state.catalog.filter(p => productStatus(p) === s).length;
+    const newCount = newDesignProducts().length;
 
     view.innerHTML = `
     <div class="page">
-      <header class="page-header"><h1>Products &amp; Materials</h1><p>Browse what the company has in stock. This list is view-only — stock records are managed by Inventory.</p></header>
+      <header class="page-header"><h1>Products &amp; Materials</h1><p>Existing products from Inventory, updated live, plus new products that your ongoing design projects need. Low stock shows in red. This page is view-only.</p></header>
       ${state.catalogError ? '<div class="notice">The product list could not be loaded. Make sure the Inventory SQL was run in Supabase.</div>' : ""}
-      <section class="grid grid-4">${[["Total Items", state.catalog.length, "Registered products and materials"], ["In Stock", count("ok"), "Available to request"],
-        ["Low Stock", count("low"), "Limited quantity"], ["Out of Stock", count("out"), "Unavailable right now"]].map(c =>
-        `<article class="stat-card"><p class="stat-label">${c[0]}</p><p class="stat-value">${c[1]}</p><p class="stat-note">${c[2]}</p></article>`).join("")}</section>
+      <section class="grid grid-4">${[["Existing Products", state.catalog.length, "Registered by Inventory"], ["In Stock", count("ok"), "Available right now"],
+        ["Low / Out of Stock", count("low") + count("out"), "Limited or unavailable"], ["New Design Products", newCount, "From ongoing design projects"]].map(c =>
+        `<article class="stat-card"><p class="stat-label">${c[0]}</p><p class="stat-value"${c[0] === "Low / Out of Stock" && c[1] > 0 ? LOW_STYLE : ""}>${c[1]}</p><p class="stat-note">${c[2]}</p></article>`).join("")}</section>
+
       <div class="toolbar">
-        <input type="text" id="pQ" class="search-input" placeholder="Search product, category or supplier" value="${esc(pFilters.q)}">
+        <input type="text" id="pQ" class="search-input" placeholder="Search product, category, supplier or project" value="${esc(pFilters.q)}">
         <select id="pCat" class="select-input"><option value="">All categories</option>${cats.map(c => `<option${pFilters.category === c ? " selected" : ""}>${esc(c)}</option>`).join("")}</select>
         <select id="pAvail" class="select-input">${[["", "All availability"], ["ok", "In Stock"], ["low", "Low Stock"], ["out", "Out of Stock"]].map(o =>
           `<option value="${o[0]}"${pFilters.avail === o[0] ? " selected" : ""}>${o[1]}</option>`).join("")}</select>
         <select id="pSort" class="select-input">${[["name-asc", "Sort: Name (A–Z)"], ["stock-asc", "Sort: Stock (low → high)"], ["stock-desc", "Sort: Stock (high → low)"]].map(o =>
           `<option value="${o[0]}"${pFilters.sort === o[0] ? " selected" : ""}>${o[1]}</option>`).join("")}</select>
       </div>
-      <div class="card table-card"><table class="table"><thead><tr><th>Product / Material</th><th>Category</th><th class="right">Available</th><th>Unit</th><th>Status</th><th></th></tr></thead>
-        <tbody id="pBody"></tbody></table></div>
-      <p class="muted" id="pCount" style="margin-top:10px"></p>
+
+      <section class="section" style="margin-top:8px">
+        <div class="section-head"><h2>Existing products</h2></div>
+        <div class="card table-card"><table class="table"><thead><tr><th>Product</th><th>Category</th><th class="right">Available</th><th>Unit</th><th>Status</th></tr></thead>
+          <tbody id="pBody"></tbody></table></div>
+        <p class="muted" id="pCount" style="margin-top:10px"></p>
+      </section>
+
+      <section class="section">
+        <div class="section-head"><h2>Ongoing new design products</h2></div>
+        <p class="muted" style="margin:-6px 0 12px">Products typed into design projects that are not in Inventory yet. They leave this list when the project is completed.</p>
+        <div class="card table-card"><table class="table"><thead><tr><th>Product</th><th>Design project</th><th class="right">Quantity</th><th>Project status</th></tr></thead>
+          <tbody id="nBody"></tbody></table></div>
+        <p class="muted" id="nCount" style="margin-top:10px"></p>
+      </section>
     </div>`;
 
     const root = view.querySelector(".page");
     const body = root.querySelector("#pBody");
+    const nBody = root.querySelector("#nBody");
     const paint = () => {
       const list = filteredProducts();
-      body.innerHTML = list.length ? list.map(p =>
-        `<tr><td><strong>${esc(p.name)}</strong><span class="cell-sub">${esc([p.supplier, p.location].filter(Boolean).join(" · ") || p.sku)}</span></td>
-          <td>${esc(p.category)}</td><td class="right">${fmtNum(p.stock)}</td><td>${esc(p.unit)}</td><td>${stockBadge(productStatus(p))}</td>
-          <td class="right"><button type="button" class="btn btn-dark btn-sm" data-request="${esc(p.name)}">Request</button></td></tr>`).join("")
-        : '<tr><td colspan="6" class="empty-state">No products match your filters.</td></tr>';
-      root.querySelector("#pCount").textContent = list.length + " item" + (list.length === 1 ? "" : "s") + " shown";
+      body.innerHTML = list.length ? list.map(p => {
+        const st = productStatus(p);
+        return `<tr><td><strong>${esc(p.name)}</strong><span class="cell-sub">${esc([p.supplier, p.location].filter(Boolean).join(" · ") || p.sku)}</span></td>
+          <td>${esc(p.category)}</td><td class="right"${stockStyle(st)}>${fmtNum(p.stock)}</td><td>${esc(p.unit)}</td><td>${stockBadge(st)}</td></tr>`;
+      }).join("")
+        : '<tr><td colspan="5" class="empty-state">No products match your filters.</td></tr>';
+      root.querySelector("#pCount").textContent = plural(list.length, "existing product") + " shown";
+
+      const q = pFilters.q.trim().toLowerCase();
+      const nl = newDesignProducts().filter(x => !q || (x.name + " " + x.project).toLowerCase().indexOf(q) !== -1);
+      nBody.innerHTML = nl.length ? nl.map(x =>
+        `<tr class="row-link" data-design="${esc(x.designId)}"><td><strong>${esc(x.name)}</strong><span class="cell-sub">New design product</span></td>
+          <td>${esc(x.project)}</td><td class="right">${fmtNum(x.qty)}</td><td>${designBadge(x.status)}</td></tr>`).join("")
+        : '<tr><td colspan="4" class="empty-state">No new design products right now.</td></tr>';
+      root.querySelector("#nCount").textContent = plural(nl.length, "new product") + " shown";
     };
     paint();
     root.querySelector("#pQ").addEventListener("input", e => { pFilters.q = e.target.value; paint(); });
     root.querySelector("#pCat").addEventListener("change", e => { pFilters.category = e.target.value; paint(); });
     root.querySelector("#pAvail").addEventListener("change", e => { pFilters.avail = e.target.value; paint(); });
     root.querySelector("#pSort").addEventListener("change", e => { pFilters.sort = e.target.value; paint(); });
-    body.addEventListener("click", e => {
-      const b = e.target.closest("[data-request]");
-      if (!b) return;
-      draft = { project: "", reason: "", items: [{ name: b.dataset.request, qty: "" }] };
-      go("requisition");
-      toast(b.dataset.request + " added to a new requisition.");
-    });
+    nBody.addEventListener("click", e => { const r = e.target.closest("[data-design]"); if (r) openDesign(r.dataset.design); });
   }
 
   /* ======================================================================
@@ -1107,6 +1391,24 @@
     }).join("");
   }
 
+  /* New design products appear here only after Purchasing has bought them */
+  function purchaseRows() {
+    const q = hFilters.q.trim().toLowerCase();
+    const list = state.purchasing.filter(x => x.designId && x.status === "Purchased").filter(x => {
+      if (!q) return true;
+      const d = getDesign(x.designId);
+      return (x.id + " " + x.product + " " + (d ? d.name : "")).toLowerCase().indexOf(q) !== -1;
+    });
+    if (!list.length) return '<tr><td colspan="7" class="empty-state">Nothing has been purchased for your design projects yet.</td></tr>';
+    return list.map(x => {
+      const d = getDesign(x.designId);
+      return `<tr class="row-link" data-design="${esc(x.designId)}">
+        <td><strong>${esc(x.id)}</strong></td><td>${esc(d ? d.name : "—")}</td><td class="product">${esc(x.product)}</td>
+        <td class="right">${fmtNum(x.qty)} ${esc(x.unit)}</td><td>${esc(x.requestedBy)}</td><td>${fmtDate(x.updatedAt)}</td>
+        <td>${x.inInventory ? '<span class="badge badge-green">In Inventory</span>' : '<span class="badge badge-yellow">Not in Inventory yet</span>'}</td></tr>`;
+    }).join("");
+  }
+
   function pageHistory(view, arg) {
     if (arg && arg.indexOf("status-") === 0) hFilters.status = arg.slice(7);
 
@@ -1126,14 +1428,24 @@
         <th>Request ID</th><th>Date</th><th>Material</th><th>Project</th><th class="right">Quantity</th><th>Status</th><th>Fulfilment</th>
         </tr></thead><tbody id="hBody"></tbody></table></div>
       <p class="muted" id="hCount" style="margin-top:10px"></p>
+
+      <section class="section">
+        <div class="section-head"><h2>New Design Purchases</h2></div>
+        <p class="muted" style="margin:-6px 0 12px">Shown only after Purchasing has bought the products for a new design. It tells you whether they are already in Inventory.</p>
+        <div class="card table-card"><table class="table"><thead><tr>
+          <th>Purchase ID</th><th>Design project</th><th>Product</th><th class="right">Quantity</th><th>Requested by</th><th>Purchased</th><th>Inventory</th>
+          </tr></thead><tbody id="pcBody"></tbody></table></div>
+      </section>
     </div>`;
 
     const root = view.querySelector(".page");
     const body = root.querySelector("#hBody");
+    const pcBody = root.querySelector("#pcBody");
     const paint = () => {
       const list = filteredRequests();
       body.innerHTML = historyRows(list);
-      root.querySelector("#hCount").textContent = list.length + " request" + (list.length === 1 ? "" : "s") + " shown";
+      pcBody.innerHTML = purchaseRows();
+      root.querySelector("#hCount").textContent = plural(list.length, "request") + " shown";
     };
     paint();
 
@@ -1152,6 +1464,7 @@
             r.status, fulfilment(r), r.remarks, r.neededBy])));
     });
     body.addEventListener("click", e => { const row = e.target.closest("[data-open]"); if (row) openRequest(row.dataset.open); });
+    pcBody.addEventListener("click", e => { const row = e.target.closest("[data-design]"); if (row) openDesign(row.dataset.design); });
     if (arg && /^REQ-\d+$/.test(arg)) openRequest(arg);
   }
 
@@ -1208,7 +1521,7 @@
      11. NOTIFICATIONS
      ====================================================================== */
   let nFilter = "all";
-  const N_FILTERS = [["all", "All"], ["unread", "Unread"], ["Admin", "Admin"], ["Inventory", "Inventory"], ["Requisition", "Requisition"], ["Project", "Project"]];
+  const N_FILTERS = [["all", "All"], ["unread", "Unread"], ["Requisition", "Requisition"], ["Purchasing", "Purchasing"], ["Stock", "Low stock"]];
 
   const visibleNotifs = () => state.notifications.filter(n => nFilter === "all" ? true : nFilter === "unread" ? !n.read : n.source === nFilter);
 
@@ -1219,6 +1532,8 @@
       <span class="badge badge-${n.tone}">${esc(n.source)}</span>
       <div class="notif-actions">
         ${n.reqId ? '<button type="button" class="btn btn-light btn-sm" data-view>View request</button>' : ""}
+        ${n.designId ? '<button type="button" class="btn btn-light btn-sm" data-viewd>View project</button>' : ""}
+        ${n.refSku ? '<button type="button" class="btn btn-light btn-sm" data-viewp>View products</button>' : ""}
         <button type="button" class="btn btn-light btn-sm" data-toggle>${n.read ? "Mark unread" : "Mark read"}</button>
         <button type="button" class="icon-btn" data-delete title="Delete notification">&times;</button>
       </div></li>`;
@@ -1227,10 +1542,10 @@
   function pageNotifications(view) {
     view.innerHTML = `
     <div class="page">
-      <header class="page-header page-header-row"><div><h1>Notifications</h1><p>Stay up to date on your requisitions and creative projects.</p></div>
+      <header class="page-header page-header-row"><div><h1>Notifications</h1><p>Low stock alerts, purchasing requests from any department, Purchasing results and requisition updates.</p></div>
         <button type="button" class="btn btn-light" id="markAll">Mark all as read</button></header>
       <label class="switch-row"><input type="checkbox" id="projSwitch"${state.settings.projectNotifications ? " checked" : ""}>
-        <span>Notify me about project updates (new projects and status changes)</span></label>
+        <span>Show design project notifications</span></label>
       <div class="chips" id="chips">${N_FILTERS.map(f => `<button type="button" class="chip${nFilter === f[0] ? " active" : ""}" data-f="${f[0]}">${f[1]}</button>`).join("")}</div>
       <div class="card"><ul class="notif-page-list" id="nList"></ul></div>
     </div>`;
@@ -1256,7 +1571,7 @@
     });
     root.querySelector("#projSwitch").addEventListener("change", async e => {
       const on = e.target.checked;
-      const ok = await act(() => setProjectNotifications(on), on ? "Project notifications turned on." : "Project notifications turned off.");
+      const ok = await act(async () => { await setProjectNotifications(on); await reload(); }, on ? "Design notifications turned on." : "Design notifications turned off.");
       if (!ok) e.target.checked = !on;
     });
     list.addEventListener("click", async e => {
@@ -1267,6 +1582,8 @@
       if (!n) return;
       if (e.target.closest("[data-delete]")) { await act(async () => { await removeNotification(n.id); await reload(); }); return; }
       if (e.target.closest("[data-toggle]")) { await act(async () => { await setRead(n.id, !n.read); await reload(); }); return; }
+      if (e.target.closest("[data-viewp]")) { await act(async () => { await setRead(n.id, true); await reload(); }); go("products"); return; }
+      if (e.target.closest("[data-viewd]")) { await act(async () => { await setRead(n.id, true); await reload(); }); openDesign(n.designId); return; }
       if (e.target.closest("[data-view]")) { await act(async () => { await setRead(n.id, true); await reload(); }); openRequest(n.reqId); return; }
       if (!n.read) await act(async () => { await setRead(n.id, true); await reload(); });
     });
@@ -1275,7 +1592,7 @@
   pages.dashboard     = { title: "Marketing Dashboard", render: pageDashboard };
   pages.requisition   = { title: "Requisition", render: pageRequisition };
   pages.designs       = { title: "Project Designs", render: pageDesigns };
-  pages.products     = { title: "Products & Materials", render: pageProducts };
+  pages.products      = { title: "Products & Materials", render: pageProducts };
   pages.history       = { title: "Request History", render: pageHistory };
   pages.notifications = { title: "Notifications", render: pageNotifications };
 

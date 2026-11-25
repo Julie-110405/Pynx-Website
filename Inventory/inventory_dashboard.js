@@ -1,7 +1,8 @@
 /* ==========================================================================
    PYNX Inventory — one script for all menus
-   Menus: Dashboard, Requisition, Products, Delivery, Inventory Reports, Logout
-   Data: Supabase tables inventory_products and inventory_movements
+   Menus: Dashboard, Requisition, Products, Purchasing, Delivery, Inventory Reports, Logout
+   Data: inventory_products, inventory_movements, inventory_purchase_requests,
+         inventory_requisition_checks (Supabase)
    ========================================================================== */
 (function () {
   'use strict';
@@ -9,12 +10,14 @@
   const sb = window.supabaseClient;
   const LOGIN_URL = '../Log_in/login.html';
   const ALLOWED_DEPARTMENTS = ['inventory', 'admin'];
+  const REQ_DEPT = 'Marketing & Design';
+  const PRODUCT_CATEGORIES = ['Bikini', 'Cap'];
+  const PRODUCT_SUPPLIER = 'House of Fabrics';
 
   const CFG = {
     locale: 'en-US',
     currency: '₱',
-    toastMs: 2400,
-    skuPrefix: 'INV-',
+    toastMs: 2800,
     defaultView: 'dashboard'
   };
 
@@ -22,13 +25,16 @@
     { id: 'dashboard',   icon: '▦', label: 'Dashboard' },
     { id: 'requisition', icon: '☰', label: 'Requisition' },
     { id: 'products',    icon: '▤', label: 'Products' },
+    { id: 'purchasing',  icon: '◧', label: 'Purchasing' },
     { id: 'delivery',    icon: '▷', label: 'Delivery' },
     { id: 'reports',     icon: '▥', label: 'Inventory Reports' }
   ];
 
-  const state = { products: [], movements: [], profile: null };
+  const state = { products: [], movements: [], purchases: [], checks: [], profile: null };
   let current = null;
   let loadToken = 0;
+  let livePending = false;
+  let liveTimer = null;
 
   /* ---------------------------------------------------------------------
      Small helpers
@@ -53,6 +59,13 @@
     return isNaN(d) ? String(s) : d.toLocaleDateString(CFG.locale, { month: 'short', day: 'numeric', year: 'numeric' });
   };
 
+  /* Date for timestamp columns (created_at, delivered_at, ...) */
+  const fstamp = s => {
+    if (!s) return '—';
+    const d = new Date(s);
+    return isNaN(d) ? '—' : d.toLocaleDateString(CFG.locale, { month: 'short', day: 'numeric', year: 'numeric' });
+  };
+
   const STATUS = { In: 'In Stock', Low: 'Low Stock', Out: 'Out of Stock' };
   const TONE = { In: 'ok', Low: 'warn', Out: 'bad' };
   const statusOf = p => (Number(p.qty) <= 0 ? 'Out' : Number(p.qty) <= Number(p.min_level) ? 'Low' : 'In');
@@ -63,6 +76,21 @@
   const findProduct = sku => state.products.find(p => p.sku === sku);
   const productName = sku => (findProduct(sku) || {}).name || sku;
   const productUnit = sku => (findProduct(sku) || {}).unit || '';
+
+  /* Purchasing helpers */
+  const CLOSED = ['Rejected', 'Stocked', 'Cancelled'];
+  const isOpenReq = r => !CLOSED.includes(r.status);
+  const PU_TONE = {
+    'Pending Admin': 'warn', 'With Purchasing': 'warn', 'Ordered': 'warn',
+    'Delivered': 'ok', 'Stocked': 'ok', 'Rejected': 'bad', 'Cancelled': 'mut'
+  };
+  const ADMIN_TONE = { Pending: 'warn', Approved: 'ok', Rejected: 'bad' };
+  const INV_TONE = { Accepted: 'ok', Rejected: 'bad' };
+  const openPurchaseFor = sku => state.purchases.find(r => r.sku === sku && isOpenReq(r));
+  const deliveredCount = () => state.purchases.filter(r => r.status === 'Delivered').length;
+  const originLabel = r => (r.source === 'inventory' ? 'Inventory Department' : r.origin_department);
+  const isAdmin = () => !!state.profile && String(state.profile.department).toLowerCase() === 'admin';
+  const isDeclined = r => state.checks.some(c => String(c.requisition_id) === String(r.id) && c.decision === 'Declined');
 
   const head = (title, sub = '') => `<h1>${esc(title)}</h1>${sub ? `<p class="sub">${esc(sub)}</p>` : ''}`;
 
@@ -93,6 +121,13 @@
     setTimeout(() => t.remove(), CFG.toastMs);
   }
 
+  /* Calls a Supabase function; shows the error as a toast and returns false on failure */
+  async function call(name, args) {
+    const { error } = await sb.rpc(name, args);
+    if (error) { toast(error.message); return false; }
+    return true;
+  }
+
   /* ---------- Modal ---------- */
   let onModalClose = null;
 
@@ -101,16 +136,17 @@
     if (m) m.remove();
     document.body.classList.remove('modal-open');
     if (onModalClose) { const f = onModalClose; onModalClose = null; f(); }
+    if (livePending && !$('#modal')) { livePending = false; softRefresh(); }
   }
 
-  function modal(html) {
+  function modal(html, wide) {
     closeModal();
     const m = document.createElement('div');
     m.className = 'modal';
     m.id = 'modal';
     m.setAttribute('role', 'dialog');
     m.setAttribute('aria-modal', 'true');
-    m.innerHTML = `<div class="card">${html}</div>`;
+    m.innerHTML = `<div class="card${wide ? ' wide' : ''}">${html}</div>`;
     m.addEventListener('click', ev => {
       if (ev.target === m || ev.target.closest('[data-close]')) closeModal();
     });
@@ -156,15 +192,21 @@
      Data (Supabase)
      --------------------------------------------------------------------- */
   async function loadData() {
-    const [p, m] = await Promise.all([
+    const [p, m, pr, ck] = await Promise.all([
       sb.from('inventory_products').select('*').order('name'),
-      sb.from('inventory_movements').select('*').order('created_at', { ascending: false }).limit(1000)
+      sb.from('inventory_movements').select('*').order('created_at', { ascending: false }).limit(1000),
+      sb.from('inventory_purchase_requests').select('*').order('created_at', { ascending: false }).limit(1000),
+      sb.from('inventory_requisition_checks').select('*')
     ]);
     if (p.error) throw p.error;
     if (m.error) throw m.error;
+    if (pr.error) throw pr.error;
+    if (ck.error) throw ck.error;
     state.products = p.data || [];
     state.movements = (m.data || []).sort((a, b) =>
       String(b.movement_date).localeCompare(String(a.movement_date)) || b.id - a.id);
+    state.purchases = pr.data || [];
+    state.checks = ck.data || [];
   }
 
   async function refresh() {
@@ -174,6 +216,26 @@
     } catch (err) {
       showError(err);
     }
+  }
+
+  /* Live updates: when Purchasing or Admin changes a request, the screen updates by itself */
+  function softRefresh() {
+    clearTimeout(liveTimer);
+    liveTimer = setTimeout(async () => {
+      if ($('#modal')) { livePending = true; return; }
+      const a = document.activeElement;
+      if (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) { livePending = true; return; }
+      try { await loadData(); render(); } catch (err) { console.warn(err); }
+    }, 600);
+  }
+
+  function startLive() {
+    try {
+      sb.channel('inventory-live')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'inventory_purchase_requests' }, softRefresh)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'marketing_requisitions' }, softRefresh)
+        .subscribe();
+    } catch (err) { console.warn(err); }
   }
 
   function showError(err) {
@@ -186,9 +248,10 @@
      Navigation
      --------------------------------------------------------------------- */
   function renderNav() {
+    const dc = deliveredCount();
     $('#nav').innerHTML = NAV.map(n => `
       <a href="#${esc(n.id)}" class="${n.id === current ? 'on' : ''}" ${n.id === current ? 'aria-current="page"' : ''}>
-        <span class="nav-icon" aria-hidden="true">${n.icon}</span>${esc(n.label)}
+        <span class="nav-icon" aria-hidden="true">${n.icon}</span>${esc(n.label)}${n.id === 'delivery' && dc ? `<span class="count-badge">${dc}</span>` : ''}
       </a>`).join('') + `
       <a href="#" class="logout" data-logout>
         <span class="nav-icon" aria-hidden="true">⇥</span>Log out
@@ -224,10 +287,14 @@
   }
 
   function render() {
+    renderNav();
     const root = document.createElement('div');
     root.className = 'view';
     $('#main').replaceChildren(root);
-    const views = { dashboard: viewDashboard, requisition: viewRequisition, products: viewProducts, delivery: viewDelivery, reports: viewReports };
+    const views = {
+      dashboard: viewDashboard, requisition: viewRequisition, products: viewProducts,
+      purchasing: viewPurchasing, delivery: viewDelivery, reports: viewReports
+    };
     (views[current] || viewDashboard)(root);
   }
 
@@ -311,7 +378,7 @@
         <div class="card"><div class="mut">Total Products</div><div class="big">${act.length}</div><div class="mut">Active registered items</div></div>
         <div class="card"><div class="mut">Low Stock Items</div><div class="big">${lowCount}</div><div class="mut">At or below minimum level</div></div>
         <div class="card"><div class="mut">Out of Stock</div><div class="big">${outCount}</div><div class="mut">Currently unavailable</div></div>
-        <div class="card"><div class="mut">Pending Requisitions</div><div class="big">—</div><div class="mut">Shown once the Requisition module is connected</div></div>
+        <div class="card"><div class="mut">Open Purchasing</div><div class="big">${state.purchases.filter(isOpenReq).length}</div><div class="mut">Requests not yet stocked</div></div>
       </div>
 
       <div class="card">
@@ -341,7 +408,7 @@
   }
 
   /* ---------------------------------------------------------------------
-     REQUISITION (Stage 5): validate stock, release, forward shortages to Procurement
+     REQUISITION: validate stock, release, decline and request purchasing
      --------------------------------------------------------------------- */
   const rq = { status: 'active' };
 
@@ -362,21 +429,21 @@
       ...r, items: (r.marketing_requisition_items || []).sort((a, b) => a.id - b.id)
     }));
 
-    const toValidate = reqs.filter(r => r.status === 'Approved' && !r.inventory_confirmed).length;
+    const toValidate = reqs.filter(r => r.status === 'Approved' && !r.inventory_confirmed && !isDeclined(r)).length;
     const ready = reqs.filter(r => r.inventory_confirmed && r.status !== 'Completed').length;
-    const partial = reqs.filter(r => r.status === 'Partial').length;
 
     const stat = r => r.status === 'Completed' ? pill('ok', 'Completed')
       : r.status === 'Partial' ? pill('warn', 'Partially released')
-      : r.inventory_confirmed ? pill('ok', 'Ready to release') : pill('warn', 'To validate');
+      : r.inventory_confirmed ? pill('ok', 'Ready to release')
+      : isDeclined(r) ? pill('bad', 'Declined · not enough stock')
+      : pill('warn', 'To validate');
 
     const wrap = document.createElement('div');
     wrap.innerHTML = `
-      ${head('Requisition', 'Validate approved requests against stock, release materials, and forward shortages to Procurement.')}
-      <div class="grid g3">
+      ${head('Requisition', 'Validate approved requests against stock, release materials, and request purchasing for shortages.')}
+      <div class="grid g2">
         <div class="card"><div class="mut">To validate</div><div class="big">${toValidate}</div><div class="mut">Approved, availability not checked</div></div>
         <div class="card"><div class="mut">Ready to release</div><div class="big">${ready}</div><div class="mut">Validated, materials still to release</div></div>
-        <div class="card"><div class="mut">Partially released</div><div class="big">${partial}</div><div class="mut">Waiting for remaining stock</div></div>
       </div>
       <div class="card">
         <div class="tools">
@@ -385,7 +452,6 @@
           </select>
         </div>
         <div id="rq-table"></div>
-        <p class="mut" style="margin:10px 0 0">Logistics requisitions will appear here once their Procurement link is added.</p>
       </div>`;
     root.replaceChildren(wrap);
 
@@ -408,17 +474,17 @@
     draw();
     $('#rq-status', wrap).addEventListener('change', e => { rq.status = e.target.value; draw(); });
     on(wrap, 'click', '[data-open]', el => {
-      const r = reqs.find(x => x.id === el.dataset.open);
+      const r = reqs.find(x => String(x.id) === el.dataset.open);
       if (r) openRequisition(r, root);
     });
 
-    if (openId) { const r = reqs.find(x => x.id === openId); if (r) openRequisition(r, root); }
+    if (openId) { const r = reqs.find(x => String(x.id) === String(openId)); if (r) openRequisition(r, root); }
   }
 
-  async function openRequisition(r, root) {
-    const prs = await sb.from('purchase_requests').select('code, item, qty, status').eq('requisition_id', r.id);
+  function openRequisition(r, root) {
     const key = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : (Date.now() + '-' + Math.random());
     const canAct = r.status === 'Approved' || r.status === 'Partial';
+    const declined = isDeclined(r);
 
     const lines = r.items.map(it => {
       const p = it.sku ? findProduct(it.sku) : null;
@@ -428,34 +494,53 @@
         canRelease: Math.max(0, Math.min(remaining, onHand)),
         shortage: Math.max(0, remaining - onHand) };
     });
+    const totalShort = lines.reduce((s, L) => s + L.shortage, 0);
 
-    const rows = lines.map(L => `<tr>
-      <td><b>${esc(L.it.material_name)}</b><small>${esc(L.it.sku || 'No SKU')}</small></td>
-      <td class="r">${num(L.it.qty)} ${esc(L.it.unit)}</td>
-      <td class="r">${num(L.it.released)}</td>
-      <td class="r">${num(L.remaining)}</td>
-      <td class="r">${L.p ? num(L.onHand) : '—'}</td>
-      <td class="r">${L.shortage > 0 ? pill('bad', num(L.shortage)) : pill('ok', '0')}</td>
-      <td class="r">${canAct && r.inventory_confirmed && L.canRelease > 0
-        ? `<input type="number" class="rel" data-item="${L.it.id}" min="0" max="${L.canRelease}" step="any" value="${L.canRelease}" style="width:90px">` : '—'}</td>
-      <td>${canAct && r.inventory_confirmed && L.shortage > 0
-        ? `<button type="button" class="sm" data-fwd="${L.it.id}" data-q="${L.shortage}">Forward ${num(L.shortage)}</button>` : ''}</td>
-    </tr>`).join('');
+    const myPurchases = state.purchases.filter(x => String(x.requisition_id) === String(r.id));
+    const prFor = L => myPurchases.find(x =>
+      String(x.item_name).toLowerCase() === String(L.it.material_name).toLowerCase() && isOpenReq(x));
+
+    const rows = lines.map(L => {
+      const pr = prFor(L);
+      let action = '';
+      if (pr) action = pill(PU_TONE[pr.status] || 'mut', 'Purchasing: ' + pr.status);
+      else if (canAct && L.shortage > 0 && (declined || r.inventory_confirmed)) {
+        action = `<button type="button" class="sm pri" data-fwd="${L.it.id}">Request Purchasing</button>`;
+      }
+      return `<tr>
+        <td><b>${esc(L.it.material_name)}</b><small>${esc(L.it.sku || 'No SKU')}</small></td>
+        <td class="r">${num(L.it.qty)} ${esc(L.it.unit)}</td>
+        <td class="r">${num(L.it.released)}</td>
+        <td class="r">${num(L.remaining)}</td>
+        <td class="r">${L.p ? num(L.onHand) : '—'}</td>
+        <td class="r">${L.shortage > 0 ? pill('bad', num(L.shortage)) : pill('ok', '0')}</td>
+        <td class="r">${canAct && r.inventory_confirmed && L.canRelease > 0
+          ? `<input type="number" class="rel" data-item="${L.it.id}" min="0" max="${L.canRelease}" step="any" value="${L.canRelease}" style="width:90px">` : '—'}</td>
+        <td>${action}</td>
+      </tr>`;
+    }).join('');
+
+    let hint = '';
+    if (canAct && !r.inventory_confirmed) {
+      if (declined) hint = 'This request was declined because there is not enough stock. Use Request Purchasing for the short items. After the delivery is added to Products, you can validate this request again.';
+      else if (totalShort > 0) hint = 'There is not enough stock for some materials. Decline this request to send the shortage to the Purchasing department.';
+      else hint = 'Stock is enough for every material. Confirm availability to enable releasing.';
+    }
 
     const m = modal(`
       <h2>${esc(r.id)} · ${esc(r.project)}</h2>
       <p class="mut">${esc(r.reason)} · Needed by ${fdate(r.needed_by)}</p>
       ${table(['Material', '#Requested', '#Released', '#Remaining', '#On hand', '#Shortage', '#Release now', ''], rows)}
-      ${prs.data && prs.data.length
-        ? `<p class="mut">Purchase requests: ${prs.data.map(x =>
-            `${esc(x.code)} (${num(x.qty)} ${esc(x.item)}, ${esc(x.status)})`).join('; ')}</p>` : ''}
-      ${canAct && !r.inventory_confirmed
-        ? '<p class="hint">Check the quantities above against stock, then confirm availability to enable releasing.</p>' : ''}
+      ${myPurchases.length
+        ? `<p class="mut">Purchasing: ${myPurchases.map(x =>
+            `${esc(x.code)} (${num(x.qty)} ${esc(x.unit)} ${esc(x.item_name)}, ${esc(x.status)})`).join('; ')}</p>` : ''}
+      ${hint ? `<p class="hint">${esc(hint)}</p>` : ''}
       <p class="acts">
         <button type="button" data-close>Close</button>
-        ${canAct && !r.inventory_confirmed ? '<button type="button" class="pri" data-confirm>Confirm availability</button>' : ''}
+        ${canAct && !r.inventory_confirmed && totalShort > 0 && !declined ? '<button type="button" class="dng" data-decline>Decline (not enough stock)</button>' : ''}
+        ${canAct && !r.inventory_confirmed && totalShort === 0 ? '<button type="button" class="pri" data-confirm>Confirm availability</button>' : ''}
         ${canAct && r.inventory_confirmed ? '<button type="button" class="pri" data-release>Release selected</button>' : ''}
-      </p>`);
+      </p>`, true);
 
     const reload = async (reopen) => { await loadData(); viewRequisition(root, reopen ? r.id : undefined); };
 
@@ -486,20 +571,45 @@
       reload(false);
     });
 
-    on(m, 'click', '[data-fwd]', async el => {
-      const q = Number(el.dataset.q);
-      const L = lines.find(x => String(x.it.id) === el.dataset.fwd);
+    on(m, 'click', '[data-decline]', async () => {
       closeModal();
-      const ok = await confirmBox('Forward shortage?',
-        `Create a purchase request for ${num(q)} ${L.it.unit} of ${L.it.material_name}?`, 'Forward', false);
+      const ok = await confirmBox('Decline requisition?',
+        'This request cannot be fulfilled from the current stock. After declining, you can send the shortage to the Purchasing department.',
+        'Decline', true);
       if (!ok) return viewRequisition(root, r.id);
-      const { error } = await sb.rpc('rw_forward_shortage', { p_req: r.id, p_item_id: L.it.id, p_qty: q });
-      if (error) toast(error.message); else toast('Shortage forwarded to Procurement');
+      const done = await call('inventory_decline_requisition', { p_req: String(r.id), p_reason: 'Insufficient stock' });
+      if (done) toast('Requisition declined. You can now request purchasing.');
+      await loadData();
+      viewRequisition(root, r.id);
+    });
+
+    on(m, 'click', '[data-fwd]', async el => {
+      const L = lines.find(x => String(x.it.id) === el.dataset.fwd);
+      if (!L) return;
+      closeModal();
+      const ok = await confirmBox('Request purchasing?',
+        `Send a purchase request for ${num(L.shortage)} ${L.it.unit} of ${L.it.material_name} to the Purchasing department? It will show that it came from ${REQ_DEPT}.`,
+        'Request Purchasing', false);
+      if (!ok) return viewRequisition(root, r.id);
+      const done = await call('inventory_create_purchase_request', {
+        p_source: 'requisition',
+        p_sku: L.it.sku || null,
+        p_item_name: L.it.material_name,
+        p_unit: L.it.unit,
+        p_qty: L.shortage,
+        p_origin_department: REQ_DEPT,
+        p_requisition_id: String(r.id),
+        p_inventory_decision: declined ? 'Rejected' : 'Accepted',
+        p_notes: `Requisition ${r.id} · ${r.project}`
+      });
+      if (done) toast('Purchase request sent to Purchasing');
+      await loadData();
       viewRequisition(root, r.id);
     });
   }
 
   /* ---------------------------------------------------------------------
+<<<<<<< HEAD
      DELIVERY (handled by other team members)
      --------------------------------------------------------------------- */
  
@@ -794,6 +904,9 @@ async function confirmStockIn(delivery) {
 
   /* ---------------------------------------------------------------------
      PRODUCTS (master records: add, edit, archive, delete)
+=======
+     PRODUCTS (add, edit, request purchasing, archive)
+>>>>>>> e940cca (Update marketing is complete)
      --------------------------------------------------------------------- */
   const pf = { q: '', category: '', status: '', sort: 'name' };
 
@@ -806,23 +919,27 @@ async function confirmStockIn(delivery) {
 
   function listProducts() {
     const needle = pf.q.trim().toLowerCase();
-    const wantArchived = pf.status === 'Archived';
     return state.products
-      .filter(p => (wantArchived ? p.archived : !p.archived))
+      .filter(p => !p.archived)
       .filter(p =>
         (p.name + p.sku + p.supplier).toLowerCase().includes(needle) &&
         (!pf.category || p.category === pf.category) &&
-        (!pf.status || wantArchived || statusOf(p) === pf.status))
+        (!pf.status || statusOf(p) === pf.status))
       .sort(SORTERS[pf.sort] || SORTERS.name);
   }
 
   function productRow(p) {
-    const actions = p.archived
-      ? `<button class="sm" data-act="restore" data-sku="${esc(p.sku)}">Restore</button>
-         <button class="sm dng" data-act="delete" data-sku="${esc(p.sku)}">Delete</button>`
-      : `<button class="sm" data-act="edit" data-sku="${esc(p.sku)}">Edit</button>
-         <button class="sm" data-act="archive" data-sku="${esc(p.sku)}">Archive</button>
-         <button class="sm dng" data-act="delete" data-sku="${esc(p.sku)}">Delete</button>`;
+    const st = statusOf(p);
+    const open = openPurchaseFor(p.sku);
+    const actions = [`<button type="button" class="sm" data-act="edit" data-sku="${esc(p.sku)}">Edit</button>`];
+
+    if (open) {
+      actions.push(pill(PU_TONE[open.status] || 'mut', 'Purchasing: ' + open.status));
+    } else {
+      if (st !== 'In') actions.push(`<button type="button" class="sm" data-act="request" data-sku="${esc(p.sku)}">Request Purchasing</button>`);
+      if (st === 'Out') actions.push(`<button type="button" class="sm" data-act="archive" data-sku="${esc(p.sku)}">Archive</button>`);
+    }
+
     return `<tr>
       <td>${esc(p.sku)}</td>
       <td><b>${esc(p.name)}</b><small>${esc(p.supplier)}</small></td>
@@ -831,13 +948,25 @@ async function confirmStockIn(delivery) {
       <td class="r">${num(p.qty)} ${esc(p.unit)}</td>
       <td class="r">${num(p.min_level)}</td>
       <td class="r">${money(p.unit_cost)}</td>
-      <td>${p.archived ? pill('mut', 'Archived') : statusPill(p)}</td>
-      <td><div class="acts">${actions}</div></td>
+      <td>${statusPill(p)}</td>
+      <td><div class="acts">${actions.join('')}</div></td>
+    </tr>`;
+  }
+
+  function archivedRow(p) {
+    const open = openPurchaseFor(p.sku);
+    return `<tr>
+      <td>${esc(p.sku)}</td>
+      <td><b>${esc(p.name)}</b><small>${esc(p.supplier)}</small></td>
+      <td>${esc(p.category)}</td>
+      <td>${esc(p.location)}</td>
+      <td>${open ? pill(PU_TONE[open.status] || 'mut', 'Purchasing: ' + open.status) : pill('mut', 'Archived')}</td>
+      <td><div class="acts">${open ? '' : `<button type="button" class="sm" data-act="request" data-sku="${esc(p.sku)}">Request Purchasing</button>`}</div></td>
     </tr>`;
   }
 
   function viewProducts(root) {
-    const cats = [...new Set(state.products.map(p => p.category))].sort();
+    const cats = [...new Set(state.products.filter(p => !p.archived).map(p => p.category))].sort();
 
     root.innerHTML = `
       ${head('Products', 'Master records of all products and materials. Stock quantities change through deliveries, requisition releases and manual adjustments.')}
@@ -848,7 +977,7 @@ async function confirmStockIn(delivery) {
             <option value="">All categories</option>${options(cats.map(c => [c, c]), pf.category)}
           </select>
           <select id="p-status" aria-label="Status">
-            ${options([['', 'All statuses'], ['In', 'In Stock'], ['Low', 'Low Stock'], ['Out', 'Out of Stock'], ['Archived', 'Archived']], pf.status)}
+            ${options([['', 'All statuses'], ['In', 'In Stock'], ['Low', 'Low Stock'], ['Out', 'Out of Stock']], pf.status)}
           </select>
           <select id="p-sort" aria-label="Sort">
             ${options([['name', 'Sort: Name'], ['sku', 'Sort: SKU'], ['qty', 'Sort: Stock (low first)'], ['cost', 'Sort: Unit cost']], pf.sort)}
@@ -857,6 +986,15 @@ async function confirmStockIn(delivery) {
         </div>
         <div id="p-table"></div>
         <p class="mut" id="p-count" style="margin:10px 0 0"></p>
+      </div>
+
+      <div class="card" id="p-archive">
+        <h2>Archived Products</h2>
+        <p class="hint" style="margin-top:0">
+          The archive is for products that are out of stock and will not be restocked. Archived products are hidden from the product list, dashboard and reports.
+          The only way to bring an archived product back is to send a purchasing request: once the purchased items are delivered and added to inventory, the product returns to the Products list.
+        </p>
+        <div id="p-archive-table"></div>
       </div>`;
 
     const box = $('#p-table', root);
@@ -865,6 +1003,10 @@ async function confirmStockIn(delivery) {
       box.innerHTML = table(['SKU', 'Product', 'Category', 'Location', '#On hand', '#Min. level', '#Unit cost', 'Status', ''],
         list.map(productRow).join(''), 'No products match your filters.');
       $('#p-count', root).textContent = list.length + ' product' + (list.length === 1 ? '' : 's') + ' shown';
+
+      const archived = state.products.filter(p => p.archived).sort(SORTERS.name);
+      $('#p-archive-table', root).innerHTML = table(['SKU', 'Product', 'Category', 'Location', 'Status', ''],
+        archived.map(archivedRow).join(''), 'No archived products.');
     }
     draw();
 
@@ -877,46 +1019,36 @@ async function confirmStockIn(delivery) {
       const sku = el.dataset.sku;
       if (el.dataset.act === 'add') productForm(null);
       if (el.dataset.act === 'edit') productForm(sku);
-      if (el.dataset.act === 'archive') setArchived(sku, true);
-      if (el.dataset.act === 'restore') setArchived(sku, false);
-      if (el.dataset.act === 'delete') deleteProduct(sku);
+      if (el.dataset.act === 'archive') setArchived(sku);
+      if (el.dataset.act === 'request') purchaseForm(sku);
     });
   }
 
-  function nextSku() {
-    const max = state.products.reduce((m, p) => {
-      const n = parseInt(String(p.sku).replace(/\D/g, ''), 10);
-      return n > m ? n : m;
-    }, 0);
-    return CFG.skuPrefix + String(max + 1).padStart(3, '0');
-  }
-
+  /* The SKU of a new product is created by the database (INV-001, INV-002, ...) */
   function productForm(sku) {
     const p = sku ? findProduct(sku) : null;
     if (sku && !p) return;
-    const v = p || { sku: nextSku(), name: '', supplier: '', category: '', location: '', unit: 'pcs', qty: 0, min_level: 0, unit_cost: 0 };
-    const cats = [...new Set(state.products.map(x => x.category))].sort();
+    const v = p || { sku: '', name: '', supplier: PRODUCT_SUPPLIER, category: PRODUCT_CATEGORIES[0], location: 'Main Storage', unit: 'pcs', qty: 0, min_level: 0, unit_cost: 0 };
     const units = [...new Set(['pcs', 'meters', 'packs', 'liters', 'rolls', 'kg', ...state.products.map(x => x.unit), v.unit])].filter(Boolean);
 
     const m = modal(`
       <h2>${p ? 'Edit product' : 'Add product'}</h2>
       <form id="pform" novalidate>
-        <label for="f-sku">SKU *</label>
-        <input id="f-sku" name="sku" value="${esc(v.sku)}" ${p ? 'readonly' : ''} required>
+        <label for="f-sku">SKU</label>
+        <input id="f-sku" value="${p ? esc(v.sku) : ''}" placeholder="Assigned automatically when saved" readonly>
 
         <label for="f-name">Product name *</label>
         <input id="f-name" name="name" value="${esc(v.name)}" required>
 
         <div class="two">
           <div><label for="f-cat">Category *</label>
-            <input id="f-cat" name="category" list="dl-cat" value="${esc(v.category)}" required>
-            <datalist id="dl-cat">${cats.map(c => `<option value="${esc(c)}">`).join('')}</datalist></div>
+            <select id="f-cat" name="category" required>${options(PRODUCT_CATEGORIES.map(c => [c, c]), v.category)}</select></div>
           <div><label for="f-unit">Unit *</label>
             <select id="f-unit" name="unit" required>${options(units.map(u => [u, u]), v.unit)}</select></div>
         </div>
 
         <div class="two">
-          <div><label for="f-sup">Supplier</label><input id="f-sup" name="supplier" value="${esc(v.supplier)}"></div>
+          <div><label for="f-sup">Supplier</label><input id="f-sup" name="supplier" value="${PRODUCT_SUPPLIER}" readonly></div>
           <div><label for="f-loc">Storage location</label><input id="f-loc" name="location" value="${esc(v.location)}"></div>
         </div>
 
@@ -930,7 +1062,7 @@ async function confirmStockIn(delivery) {
 
         <div class="hint">${p
           ? 'Changing the on hand quantity is saved as a stock adjustment in the movement history.'
-          : 'The on hand quantity you enter is saved as the opening stock of this product.'}</div>
+          : 'The SKU is created automatically. The on hand quantity you enter is saved as the opening stock of this product.'}</div>
 
         <p class="acts" style="margin-top:16px">
           <button type="button" data-close>Cancel</button>
@@ -945,19 +1077,17 @@ async function confirmStockIn(delivery) {
       const d = Object.fromEntries(new FormData(ev.target));
       const row = {
         name: String(d.name || '').trim(),
-        supplier: String(d.supplier || '').trim(),
+        supplier: PRODUCT_SUPPLIER,
         category: String(d.category || '').trim(),
         location: String(d.location || '').trim(),
         unit: String(d.unit || '').trim(),
         min_level: Number(d.min_level) || 0,
         unit_cost: Number(d.unit_cost) || 0
       };
-      const newSku = String(d.sku || '').trim();
       const newQty = Number(d.qty) || 0;
 
-      if (!newSku) return toast('SKU is required');
       if (!row.name) return toast('Product name is required');
-      if (!row.category) return toast('Category is required');
+      if (!PRODUCT_CATEGORIES.includes(row.category)) return toast('Category must be Bikini or Cap');
       if (!row.unit) return toast('Unit is required');
       if (row.min_level < 0 || row.unit_cost < 0 || newQty < 0) return toast('Numbers cannot be negative');
 
@@ -966,11 +1096,11 @@ async function confirmStockIn(delivery) {
 
       const res = p
         ? await sb.from('inventory_products').update({ ...row, updated_at: new Date().toISOString() }).eq('sku', p.sku).select()
-        : await sb.from('inventory_products').insert({ sku: newSku, ...row }).select();
+        : await sb.from('inventory_products').insert(row).select();
 
       if (res.error) {
         btn.disabled = false;
-        return toast(res.error.code === '23505' ? 'SKU already exists' : res.error.message);
+        return toast(res.error.code === '23505' ? 'This product already exists' : res.error.message);
       }
       if (!res.data || !res.data.length) {
         btn.disabled = false;
@@ -978,7 +1108,7 @@ async function confirmStockIn(delivery) {
       }
 
       /* Quantity change is recorded as a stock movement, so history and reports stay correct */
-      const targetSku = p ? p.sku : newSku;
+      const targetSku = p ? p.sku : res.data[0].sku;
       const before = p ? Number(p.qty) : 0;
       const diff = Math.round((newQty - before) * 1000) / 1000;
 
@@ -1001,36 +1131,255 @@ async function confirmStockIn(delivery) {
     });
   }
 
-  async function setArchived(sku, value) {
+  /* Request purchasing for a low / out of stock product (goes to admin first) */
+  function purchaseForm(sku) {
     const p = findProduct(sku);
     if (!p) return;
-    if (value) {
-      const ok = await confirmBox('Archive product?', `"${p.name}" will be hidden from the product list and reports. You can restore it later.`, 'Archive', false);
-      if (!ok) return;
-    }
-    const res = await sb.from('inventory_products')
-      .update({ archived: value, updated_at: new Date().toISOString() }).eq('sku', sku).select();
-    if (res.error) return toast(res.error.message);
-    if (!res.data || !res.data.length) return toast('You do not have permission to change products.');
-    toast(value ? 'Product archived' : 'Product restored');
-    refresh();
+    if (openPurchaseFor(sku)) return toast('A purchasing request is already open for this product.');
+    const suggest = Math.max(1, Math.ceil(Number(p.min_level) * 2 - Number(p.qty)));
+
+    const m = modal(`
+      <h2>Request purchasing</h2>
+      <p class="mut">${esc(p.name)} (${esc(p.sku)}) · On hand ${num(p.qty)} ${esc(p.unit)} · Minimum ${num(p.min_level)}</p>
+      <form id="prform" novalidate>
+        <label for="pr-qty">Quantity to purchase (${esc(p.unit)}) *</label>
+        <input id="pr-qty" type="number" min="0" step="any" value="${suggest}" required>
+
+        <label for="pr-notes">Notes (optional)</label>
+        <textarea id="pr-notes" rows="3"></textarea>
+
+        <div class="hint">This request is from the Inventory Department. It is sent to the admin first. After the admin approves it, it moves to the Purchasing department.</div>
+
+        <p class="acts" style="margin-top:16px">
+          <button type="button" data-close>Cancel</button>
+          <button type="submit" class="pri" id="pr-save">Submit to admin</button>
+        </p>
+      </form>`);
+
+    $('#pr-qty', m).focus();
+
+    $('#prform', m).addEventListener('submit', async ev => {
+      ev.preventDefault();
+      const qty = Number($('#pr-qty', m).value);
+      if (!(qty > 0)) return toast('Enter a quantity greater than zero.');
+      const btn = $('#pr-save', m);
+      btn.disabled = true;
+      const done = await call('inventory_create_purchase_request', {
+        p_source: 'inventory',
+        p_sku: p.sku,
+        p_item_name: p.name,
+        p_unit: p.unit,
+        p_qty: qty,
+        p_origin_department: 'Inventory',
+        p_requisition_id: null,
+        p_inventory_decision: null,
+        p_notes: $('#pr-notes', m).value.trim()
+      });
+      if (!done) { btn.disabled = false; return; }
+      closeModal();
+      toast('Request sent to admin for approval');
+      refresh();
+    });
   }
 
-  async function deleteProduct(sku) {
+  async function setArchived(sku) {
     const p = findProduct(sku);
     if (!p) return;
-    if (Number(p.qty) > 0) return toast('Only products with zero stock can be deleted');
-    const ok = await confirmBox('Delete product?', `Permanently delete "${p.name}" (${p.sku})? This cannot be undone.`, 'Delete', true);
+    const ok = await confirmBox('Archive product?',
+      `"${p.name}" will move to the Archived area below the products list and will be hidden from the dashboard and reports. It can only be brought back by sending a purchasing request.`,
+      'Archive', false);
     if (!ok) return;
-    const res = await sb.from('inventory_products').delete().eq('sku', sku).select();
-    if (res.error) {
-      return toast(res.error.code === '23503'
-        ? 'This product has stock history, so it cannot be deleted. Archive it instead.'
-        : res.error.message);
+    const done = await call('inventory_archive_product', { p_sku: sku });
+    if (done) { toast('Product archived'); refresh(); }
+  }
+
+  /* ---------------------------------------------------------------------
+     PURCHASING (history, status and updates of every purchase request)
+     --------------------------------------------------------------------- */
+  const pu = { tab: 'all', q: '' };
+  const PU_TABS = [
+    ['all', 'All'],
+    ['pending', 'Pending admin'],
+    ['progress', 'With Purchasing'],
+    ['delivered', 'Delivered'],
+    ['history', 'History']
+  ];
+
+  function purchaseTab(r, tab) {
+    if (tab === 'pending') return r.status === 'Pending Admin';
+    if (tab === 'progress') return r.status === 'With Purchasing' || r.status === 'Ordered';
+    if (tab === 'delivered') return r.status === 'Delivered';
+    if (tab === 'history') return CLOSED.includes(r.status);
+    return true;
+  }
+
+  function viewPurchasing(root) {
+    const all = state.purchases;
+    const count = t => all.filter(r => purchaseTab(r, t)).length;
+
+    root.innerHTML = `
+      ${head('Purchasing', 'Purchase requests from Inventory and other departments, with their approval status and purchasing updates.')}
+      <div class="grid g4">
+        <div class="card"><div class="mut">Pending admin</div><div class="big">${count('pending')}</div><div class="mut">Inventory requests waiting for approval</div></div>
+        <div class="card"><div class="mut">With Purchasing</div><div class="big">${count('progress')}</div><div class="mut">Approved, being purchased</div></div>
+        <div class="card"><div class="mut">Delivered</div><div class="big">${count('delivered')}</div><div class="mut">Waiting to be added to inventory</div></div>
+        <div class="card"><div class="mut">Added to inventory</div><div class="big">${all.filter(r => r.status === 'Stocked').length}</div><div class="mut">Completed purchases</div></div>
+      </div>
+
+      <div class="card">
+        <div class="tabs" id="pu-tabs">${PU_TABS.map(([id, label]) =>
+          `<button type="button" class="${id === pu.tab ? 'on' : ''}" data-tab="${id}">${esc(label)}</button>`).join('')}</div>
+        <div class="tools">
+          <input class="grow" id="pu-q" type="search" placeholder="Search reference, product or department" value="${esc(pu.q)}" aria-label="Search">
+        </div>
+        <div id="pu-table"></div>
+      </div>`;
+
+    function draw() {
+      const needle = pu.q.trim().toLowerCase();
+      const list = all.filter(r => purchaseTab(r, pu.tab) &&
+        [r.code, r.item_name, r.sku, originLabel(r), r.requisition_id].join(' ').toLowerCase().includes(needle));
+
+      const rows = list.map(r => {
+        const adminBtns = isAdmin() && r.status === 'Pending Admin'
+          ? `<button type="button" class="sm pri" data-pu="approve" data-id="${r.id}">Approve</button>
+             <button type="button" class="sm dng" data-pu="reject" data-id="${r.id}">Reject</button>` : '';
+        return `<tr>
+          <td><b>${esc(r.code)}</b><small>${fstamp(r.created_at)}</small></td>
+          <td><b>${esc(r.item_name)}</b><small>${esc(r.sku || 'Not yet registered')}</small></td>
+          <td class="r">${num(r.qty)} ${esc(r.unit)}</td>
+          <td>${esc(originLabel(r))}${r.requisition_id ? `<small>Requisition ${esc(r.requisition_id)}</small>` : ''}</td>
+          <td>${pill(ADMIN_TONE[r.admin_status] || 'mut', r.admin_status)}</td>
+          <td>${r.inventory_decision ? pill(INV_TONE[r.inventory_decision] || 'mut', r.inventory_decision) : '<span class="mut">—</span>'}</td>
+          <td>${pill(PU_TONE[r.status] || 'mut', r.status)}</td>
+          <td><div class="acts">${adminBtns}<button type="button" class="sm" data-pu="view" data-id="${r.id}">View</button></div></td>
+        </tr>`;
+      }).join('');
+
+      $('#pu-table', root).innerHTML = table(
+        ['Reference', 'Product', '#Quantity', 'From department', 'Admin', 'Inventory', 'Status', ''],
+        rows, 'No purchase requests here yet.');
     }
-    if (!res.data || !res.data.length) return toast('This product cannot be deleted.');
-    toast('Product deleted');
-    refresh();
+    draw();
+
+    on(root, 'click', '[data-tab]', el => {
+      pu.tab = el.dataset.tab;
+      root.querySelectorAll('#pu-tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === pu.tab));
+      draw();
+    });
+    $('#pu-q', root).addEventListener('input', e => { pu.q = e.target.value; draw(); });
+    on(root, 'click', '[data-pu]', el => {
+      const r = state.purchases.find(x => String(x.id) === el.dataset.id);
+      if (!r) return;
+      if (el.dataset.pu === 'view') purchaseDetail(r);
+      if (el.dataset.pu === 'approve') decidePurchase(r, true);
+      if (el.dataset.pu === 'reject') decidePurchase(r, false);
+    });
+  }
+
+  async function decidePurchase(r, approve) {
+    const ok = await confirmBox(
+      approve ? 'Approve request?' : 'Reject request?',
+      approve
+        ? `Approve ${num(r.qty)} ${r.unit} of ${r.item_name}? It will move to the Purchasing department.`
+        : `Reject the purchase request for ${r.item_name}?`,
+      approve ? 'Approve' : 'Reject', !approve);
+    if (!ok) return;
+    const done = await call('purchase_admin_decide', { p_id: r.id, p_approve: approve, p_note: '' });
+    if (done) { toast(approve ? 'Approved and moved to Purchasing' : 'Request rejected'); refresh(); }
+  }
+
+  async function setPurchaseStatus(r, status, qty) {
+    const done = await call('purchase_set_status', { p_id: r.id, p_status: status, p_delivered_qty: qty ?? null });
+    if (done) { toast('Status updated: ' + status); refresh(); }
+  }
+
+  function purchaseDetail(r) {
+    const adminLabel = r.source === 'requisition' && !r.admin_at
+      ? 'Approved with the requisition' : 'Admin decision: ' + r.admin_status;
+    const timeline = [
+      ['Requested', r.created_at],
+      [adminLabel, r.source === 'requisition' ? r.created_at : r.admin_at],
+      ['Ordered by Purchasing', r.ordered_at],
+      ['Delivered' + (r.delivered_qty != null ? ` (${num(r.delivered_qty)} ${r.unit})` : ''), r.delivered_at],
+      ['Added to inventory', r.stocked_at]
+    ].filter(t => t[1]);
+
+    const admin = isAdmin();
+    const adminTools = admin && ['With Purchasing', 'Ordered'].includes(r.status) ? `
+      <div class="hint">
+        Admin controls. The Purchasing department updates these same statuses from its own module.
+        ${r.status === 'With Purchasing' ? '<p><button type="button" class="sm" data-ordered>Mark as ordered</button></p>' : ''}
+        <label for="pu-dq">Delivered quantity (${esc(r.unit)})</label>
+        <input id="pu-dq" type="number" min="0" step="any" value="${esc(r.qty)}">
+        <p><button type="button" class="sm pri" data-delivered>Mark as delivered</button></p>
+      </div>` : '';
+
+    const m = modal(`
+      <h2>${esc(r.code)}</h2>
+      <div class="kv"><span>Product</span><span><b>${esc(r.item_name)}</b>${r.sku ? ` (${esc(r.sku)})` : ''}</span></div>
+      <div class="kv"><span>Quantity</span><span>${num(r.qty)} ${esc(r.unit)}</span></div>
+      <div class="kv"><span>Requested by</span><span>${esc(originLabel(r))}</span></div>
+      ${r.requisition_id ? `<div class="kv"><span>Requisition</span><span>${esc(r.requisition_id)}</span></div>` : ''}
+      <div class="kv"><span>Admin</span><span>${pill(ADMIN_TONE[r.admin_status] || 'mut', r.admin_status)}</span></div>
+      <div class="kv"><span>Inventory</span><span>${r.inventory_decision ? pill(INV_TONE[r.inventory_decision] || 'mut', r.inventory_decision) : '—'}</span></div>
+      <div class="kv"><span>Status</span><span>${pill(PU_TONE[r.status] || 'mut', r.status)}</span></div>
+      ${r.notes ? `<div class="kv"><span>Notes</span><span>${esc(r.notes)}</span></div>` : ''}
+      ${r.admin_note ? `<div class="kv"><span>Admin note</span><span>${esc(r.admin_note)}</span></div>` : ''}
+
+      <h2 style="margin-top:18px">History</h2>
+      ${timeline.map(([label, ts]) => `<div class="kv"><span>${esc(label)}</span><span>${fstamp(ts)}</span></div>`).join('')}
+
+      ${adminTools}
+      <p class="acts" style="margin-top:16px">
+        ${admin && r.status === 'Pending Admin' ? `
+          <button type="button" class="dng" data-reject>Reject</button>
+          <button type="button" class="pri" data-approve>Approve</button>` : ''}
+        <button type="button" data-close>Close</button>
+      </p>`);
+
+    on(m, 'click', '[data-approve]', () => { closeModal(); decidePurchase(r, true); });
+    on(m, 'click', '[data-reject]', () => { closeModal(); decidePurchase(r, false); });
+    on(m, 'click', '[data-ordered]', () => { closeModal(); setPurchaseStatus(r, 'Ordered'); });
+    on(m, 'click', '[data-delivered]', () => {
+      const q = Number($('#pu-dq', m).value);
+      if (!(q > 0)) return toast('Enter the delivered quantity.');
+      closeModal();
+      setPurchaseStatus(r, 'Delivered', q);
+    });
+  }
+
+  /* ---------------------------------------------------------------------
+     DELIVERY (notifications for delivered purchases + update inventory)
+     --------------------------------------------------------------------- */
+  function viewDelivery(root) {
+    const list = state.purchases.filter(r => r.status === 'Delivered');
+
+    const cards = list.map(r => {
+      const q = r.delivered_qty != null ? r.delivered_qty : r.qty;
+      return `<div class="card notice">
+        <div>
+          <b>New delivery received</b>
+          <p>${num(q)} ${esc(r.unit)} of <b>${esc(r.item_name)}</b> have been delivered.</p>
+          <p class="mut">${esc(r.code)} · Requested by ${esc(originLabel(r))} · Delivered ${fstamp(r.delivered_at)}${
+            r.delivered_qty != null && Number(r.delivered_qty) !== Number(r.qty) ? ` · Ordered ${num(r.qty)}` : ''}</p>
+        </div>
+        <button type="button" class="pri" data-stock="${r.id}">Update inventory products</button>
+      </div>`;
+    }).join('');
+
+    root.innerHTML = `
+      ${head('Delivery', 'You are notified here when purchased products have been delivered.')}
+      ${cards || `<div class="card"><h2>No new deliveries</h2>
+        <p class="mut">When newly purchased products are delivered, a notification will appear here. Use the button on it to store the items in the Products inventory.</p></div>`}`;
+
+    on(root, 'click', '[data-stock]', async el => {
+      el.disabled = true;
+      const done = await call('inventory_receive_purchase', { p_id: Number(el.dataset.stock) });
+      if (!done) { el.disabled = false; return; }
+      toast('Inventory updated. The products are now in stock.');
+      refresh();
+    });
   }
 
   /* ---------------------------------------------------------------------
@@ -1093,7 +1442,7 @@ async function confirmStockIn(delivery) {
 
     return {
       headers: ['SKU', 'Product', 'Category', '#On hand', '#Min. level', '#Unit cost', '#Value', 'Status'],
-      rows: act.sort(SORTERS.name).map(p => [
+      rows: [...act].sort(SORTERS.name).map(p => [
         p.sku, p.name, p.category, num(p.qty) + ' ' + p.unit, num(p.min_level),
         money(p.unit_cost), money(p.qty * p.unit_cost), STATUS[statusOf(p)]])
     };
@@ -1123,10 +1472,10 @@ async function confirmStockIn(delivery) {
 
       $('#r-cards', root).innerHTML = rep.tab === 'summary' ? `
         <div class="grid g4">
-          <div class="card"><div class="mut">Total Products</div><div class="big md">${act.length}</div></div>
-          <div class="card"><div class="mut">Total Units on Hand</div><div class="big md">${num(act.reduce((s, p) => s + Number(p.qty), 0))}</div></div>
-          <div class="card"><div class="mut">Inventory Value</div><div class="big md">${money(act.reduce((s, p) => s + p.qty * p.unit_cost, 0))}</div></div>
-          <div class="card"><div class="mut">Low / Out of Stock</div><div class="big md">${act.filter(p => statusOf(p) !== 'In').length}</div></div>
+          <div class="card"><div class="mut">Total Products</div><div class="big">${act.length}</div></div>
+          <div class="card"><div class="mut">Total Units on Hand</div><div class="big">${num(act.reduce((s, p) => s + Number(p.qty), 0))}</div></div>
+          <div class="card"><div class="mut">Inventory Value</div><div class="big">${money(act.reduce((s, p) => s + p.qty * p.unit_cost, 0))}</div></div>
+          <div class="card"><div class="mut">Low / Out of Stock</div><div class="big">${act.filter(p => statusOf(p) !== 'In').length}</div></div>
         </div>` : '';
 
       const rows = data.rows.map(r => `<tr>${r.map((c, i) =>
@@ -1137,7 +1486,6 @@ async function confirmStockIn(delivery) {
       $('#r-table', root).innerHTML =
         `<h2>${esc(REP_TABS.find(t => t[0] === rep.tab)[1])}${esc(range)}</h2>` +
         table(data.headers, rows, 'No records for this report.');
-      $('#r-filters', root).style.display = '';
     }
     draw();
 
@@ -1186,6 +1534,7 @@ async function confirmStockIn(delivery) {
     on($('#nav'), 'click', '[data-logout]', (el, ev) => { ev.preventDefault(); logout(); });
     addEventListener('hashchange', () => { const id = idFromHash(); if (id && id !== current) show(id); });
 
+    startLive();
     show(idFromHash() || CFG.defaultView);
   }
 
