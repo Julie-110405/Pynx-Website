@@ -20,12 +20,12 @@ git status
 
 
 Email and passwords:
-Admin - admin@phynx.web, admin987
-Finance  - finance@phynx.web, finance675
-Marketing / Creative and Design - marketing@phynx.web, marketing404
-Procument - procurement@phynx.web, procurement323
-Inventory - inventory@phynx.web, inventory999
-Logistics - logictics@phynx.web, logictics111
+Admin - admin@pynx.web, admin987
+Finance  - finance@pynx.web, finance675
+Marketing / Creative and Design - marketing@pynx.web, marketing404
+Procument - procurement@pynx.web, procurement323
+Inventory - inventory@pynx.web, inventory999
+Logistics - logictics@pynx.web, logictics111
 
 
 

@@ -15,32 +15,29 @@
       <img class="logo" src="../logo/pynx-logo.png" alt="Pynx">
       <div class="brand-tag">ADMIN</div>
     </div>
-    <div>
-      <div class="nav-label">ADMINISTRATION</div>
-      <nav class="nav">
-        <a href="#dashboard"><span class="nav-icon">▦</span>Dashboard</a>
-        <a href="#requisitions"><span class="nav-icon">☰</span>Requisition Management</a>
-        <a href="#inventory"><span class="nav-icon">▤</span>Inventory Monitoring</a>
-        <a href="#purchasing"><span class="nav-icon">◇</span>Purchasing Monitoring</a>
-        <a href="#delivery"><span class="nav-icon">▷</span>Delivery Monitoring</a>
-      </nav>
-    </div>
-    <div>
-      <div class="nav-label">MANAGEMENT</div>
-      <nav class="nav">
-        <a href="#users"><span class="nav-icon">◉</span>User Management</a>
-        <a href="#finance"><span class="nav-icon">₱</span>Finance Monitoring</a>
-        <a href="#documents"><span class="nav-icon">▭</span>Receipts and Documents</a>
-        <a href="#reports"><span class="nav-icon">≡</span>Reports</a>
-      </nav>
-    </div>
+
+    <nav class="nav">
+      <a href="#dashboard"><span class="nav-icon">▦</span>Dashboard</a>
+      <a href="#requisitions"><span class="nav-icon">☰</span>Requisition Management</a>
+      <a href="#designs"><span class="nav-icon">✎</span>Project Designs</a>
+      <a href="#inventory"><span class="nav-icon">▤</span>Inventory Monitoring</a>
+      <a href="#purchasing"><span class="nav-icon">◇</span>Purchasing Monitoring</a>
+      <a href="#delivery"><span class="nav-icon">▷</span>Delivery Monitoring</a>
+      <a href="#users"><span class="nav-icon">◉</span>User Management</a>
+      <a href="#finance"><span class="nav-icon">₱</span>Finance Monitoring</a>
+      <a href="#documents"><span class="nav-icon">▭</span>Receipts and Documents</a>
+      <a href="#reports"><span class="nav-icon">≡</span>Reports</a>
+      <a href="#" id="logout-link" class="logout"><span class="nav-icon">⇥</span>Log out</a>
+    </nav>
+
     <div class="sidebar-note">
-      Signed in as Admin<br>
-      <a href="#" id="logout-link">Log out</a>
+      <b>Admin</b>
+      Administrator
     </div>
   </aside>
 
   <main>
+    <!-- Kept for JS hooks; hidden by CSS -->
     <div class="topbar">
       <div class="crumb">PHYNX ERP / ADMIN</div>
       <div class="staff"><span></span><div class="avatar"></div></div>
@@ -50,9 +47,8 @@
     <section class="page" id="dashboard">
       <div class="heading">
         <div>
-          <div class="eyebrow">ADMIN OVERVIEW</div>
-          <h1>Dashboard</h1>
-          <p class="subtitle">A quick view of requisitions, stock, purchasing and deliveries across the business.</p>
+          <h1>Welcome to Admin!</h1>
+          <p class="subtitle" id="today"></p>
         </div>
         <a class="button button-dark" href="#requisitions">Review approvals</a>
       </div>
@@ -101,9 +97,8 @@
 
     <!-- ================= REQUISITION MANAGEMENT ================= -->
     <section class="page" id="requisitions">
-      <a class="back" href="#dashboard">← Back to dashboard</a>
       <div class="heading">
-        <div><div class="eyebrow">ADMINISTRATION</div><h1>Requisition Management</h1>
+        <div><h1>Requisition Management</h1>
         <p class="subtitle">Review requests from every department. Admin approves or rejects; Inventory and Purchasing take over after approval.</p></div>
         <div class="actions"></div>
       </div>
@@ -122,11 +117,31 @@
       </div>
     </section>
 
+    <!-- ================= PROJECT DESIGNS (received from Marketing, view-only) ================= -->
+    <section class="page" id="designs">
+      <div class="heading">
+        <div><h1>Project Designs</h1>
+        <p class="subtitle">Design projects from Marketing, with cover photos, materials and files. Material requests for a project arrive in Requisition Management.</p></div>
+        <a class="button button-dark" href="#requisitions">Review requisitions</a>
+      </div>
+      <div class="notice" id="designNotice" hidden></div>
+      <div class="metrics">
+        <div class="metric"><div class="metric-top"><span>Total Projects</span></div><div class="metric-value" id="dTotal">…</div><div class="metric-foot">Received from Marketing</div></div>
+        <div class="metric"><div class="metric-top"><span>Ongoing</span></div><div class="metric-value" id="dOngoing">…</div><div class="metric-foot">Currently in progress</div></div>
+        <div class="metric"><div class="metric-top"><span>Completed</span></div><div class="metric-value" id="dCompleted">…</div><div class="metric-foot">Finished projects</div></div>
+        <div class="metric"><div class="metric-top"><span>Design Files</span></div><div class="metric-value" id="dFiles">…</div><div class="metric-foot">Files and references</div></div>
+      </div>
+      <div class="toolbar">
+        <input type="search" id="dQ" placeholder="Search projects">
+        <select id="dStatus"><option value="">All statuses</option><option>Ongoing</option><option>Completed</option></select>
+      </div>
+      <div class="design-grid" id="designGrid"><div class="card empty-card">Loading…</div></div>
+    </section>
+
     <!-- ================= INVENTORY MONITORING ================= -->
     <section class="page" id="inventory">
-      <a class="back" href="#dashboard">← Back to dashboard</a>
       <div class="heading">
-        <div><div class="eyebrow">ADMINISTRATION</div><h1>Inventory Monitoring</h1>
+        <div><h1>Inventory Monitoring</h1>
         <p class="subtitle">View stock levels and movements. Daily stock operations stay with the Inventory department.</p></div>
       </div>
       <div class="metrics">
@@ -153,9 +168,8 @@
 
     <!-- ================= PURCHASING MONITORING ================= -->
     <section class="page" id="purchasing">
-      <a class="back" href="#dashboard">← Back to dashboard</a>
       <div class="heading">
-        <div><div class="eyebrow">ADMINISTRATION</div><h1>Purchasing Monitoring</h1>
+        <div><h1>Purchasing Monitoring</h1>
         <p class="subtitle">Follow purchase requests from Inventory and the purchase orders sent to suppliers.</p></div>
       </div>
       <div class="metrics">
@@ -175,9 +189,8 @@
 
     <!-- ================= DELIVERY MONITORING ================= -->
     <section class="page" id="delivery">
-      <a class="back" href="#dashboard">← Back to dashboard</a>
       <div class="heading">
-        <div><div class="eyebrow">ADMINISTRATION</div><h1>Delivery Monitoring</h1>
+        <div><h1>Delivery Monitoring</h1>
         <p class="subtitle">Track incoming goods from suppliers, including delays and damaged or missing items.</p></div>
       </div>
       <div class="metrics">
@@ -197,9 +210,8 @@
 
     <!-- ================= USER MANAGEMENT ================= -->
     <section class="page" id="users">
-      <a class="back" href="#dashboard">← Back to dashboard</a>
       <div class="heading">
-        <div><div class="eyebrow">MANAGEMENT</div><h1>User Management</h1>
+        <div><h1>User Management</h1>
         <p class="subtitle">View employee accounts, departments and roles.</p></div>
       </div>
       <div class="metrics">
@@ -219,18 +231,16 @@
 
     <!-- ================= FINANCE MONITORING (filled by admin_modules.js) ================= -->
     <section class="page" id="finance">
-      <a class="back" href="#dashboard">← Back to dashboard</a>
       <div class="heading">
-        <div><div class="eyebrow">MANAGEMENT</div><h1>Finance Monitoring</h1>
+        <div><h1>Finance Monitoring</h1>
         <p class="subtitle">Read-only view of purchasing and inventory values.</p></div>
       </div>
     </section>
 
     <!-- ================= RECEIPTS AND DOCUMENTS ================= -->
     <section class="page" id="documents">
-      <a class="back" href="#dashboard">← Back to dashboard</a>
       <div class="heading">
-        <div><div class="eyebrow">MANAGEMENT</div><h1>Receipts and Documents</h1>
+        <div><h1>Receipts and Documents</h1>
         <p class="subtitle">View receipts and business records by type, reference number and date.</p></div>
       </div>
       <div class="panel">
@@ -248,9 +258,8 @@
 
     <!-- ================= REPORTS ================= -->
     <section class="page" id="reports">
-      <a class="back" href="#dashboard">← Back to dashboard</a>
       <div class="heading">
-        <div><div class="eyebrow">MANAGEMENT</div><h1>Reports</h1>
+        <div><h1>Reports</h1>
         <p class="subtitle">Choose a report type, set filters, preview the result, then export or print.</p></div>
         <div class="actions"><button class="button button-light">Print</button><button class="button button-dark">Export CSV</button></div>
       </div>
@@ -277,9 +286,14 @@
   </main>
 </div>
 
+  <script>
+    document.getElementById('today').textContent =
+      new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+  </script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="../config/supabase.js"></script>
   <script src="admin_requisitions.js"></script>
   <script src="admin_modules.js"></script>
+  <script src="admin_designs.js"></script>
 </body>
 </html>
