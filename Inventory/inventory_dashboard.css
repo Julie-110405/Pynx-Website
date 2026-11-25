@@ -80,6 +80,7 @@ main { padding: 34px 32px 50px; min-width: 0; }
 /* ---------- Grids ---------- */
 .grid { display: grid; gap: var(--gap); margin-bottom: var(--gap); }
 .grid > * { min-width: 0; }
+.g2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .g3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .g4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 
@@ -99,6 +100,11 @@ main { padding: 34px 32px 50px; min-width: 0; }
 .bar i { display: block; height: 100%; background: #111; border-radius: 9px; }
 
 .count-badge { display: inline-block; margin-left: 8px; padding: 2px 9px; border-radius: 99px; background: var(--warn-bg); color: var(--warn); font-size: 12px; font-weight: 700; vertical-align: middle; }
+
+/* ---------- Key / value rows (detail windows) ---------- */
+.kv { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 8px 0; border-top: 1px solid var(--line); }
+.kv > span:first-child { color: var(--mut); font-size: 13px; }
+.kv > span:last-child { text-align: right; }
 
 /* ---------- Pills ---------- */
 .pill { display: inline-block; padding: 3px 10px; border-radius: 99px; font-size: 12px; font-weight: 600; white-space: nowrap; }
@@ -129,6 +135,7 @@ button.pri { background: #111; color: #fff; border-color: #111; }
 button.dng { background: #d33a2c; color: #fff; border-color: #d33a2c; }
 button.sm  { padding: 6px 11px; font-size: 13px; }
 .acts { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
+.acts.left { justify-content: flex-start; margin-top: 8px; }
 
 /* ---------- Tabs ---------- */
 .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
@@ -146,6 +153,7 @@ td small { display: block; color: var(--mut); }
 /* ---------- Modal ---------- */
 .modal { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 9; }
 .modal .card { width: 100%; max-width: 520px; max-height: 90vh; overflow: auto; margin-bottom: 0; }
+.modal .card.wide { max-width: 1000px; }
 
 /* ---------- Toast ---------- */
 .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: #111; color: #fff; padding: 10px 18px; border-radius: 99px; z-index: 10; max-width: calc(100vw - 32px); text-align: center; }
@@ -169,7 +177,7 @@ td small { display: block; color: var(--mut); }
 }
 
 @media (max-width: 560px) {
-  .g3, .g4 { grid-template-columns: minmax(0, 1fr); }
+  .g2, .g3, .g4 { grid-template-columns: minmax(0, 1fr); }
   .two { grid-template-columns: minmax(0, 1fr); }
   .tools .sp { display: none; }
   .card { padding: 16px; }

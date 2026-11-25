@@ -18,7 +18,7 @@
   const LOGO_URL = "../logo/pynx-logo.png";
   const ALLOWED_DEPARTMENTS = ["marketing", "admin"];
   const BUCKET = "marketing-designs";
-  const DEMO_TOOLS = true;                 // set to false to hide the "pretend to be Admin / Inventory" buttons
+  const DEMO_TOOLS = false;                // Admin, Inventory and Purchasing are connected now, so the pretend buttons stay hidden
   const POLL_MS = 30000;                   // backup check for new data
   const URL_TTL = 21600;                   // signed photo links last 6 hours
   const MAX_FILES = 10;
