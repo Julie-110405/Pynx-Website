@@ -20,17 +20,14 @@ git status
 
 
 Email and passwords:
-<<<<<<< HEAD
 Admin - admin@pynx.web, admin987
 Finance  - finance@pynx.web, finance675
 Marketing / Creative and Design - marketing@pynx.web, marketing404
 Procument - procurement@pynx.web, procurement323
-=======
 Admin - admin@pynx.web, admin987 *
 Finance  - finance@pynx.web, finance675
 Marketing / Creative and Design - marketing@pynx.web, marketing404
 Procument - procurement@pynx.web, procurement323 *
->>>>>>> e940cca (Update marketing is complete)
 Inventory - inventory@pynx.web, inventory999
 Logistics - logictics@pynx.web, logictics111
 
