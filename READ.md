@@ -51,3 +51,7 @@ Supabase Database guide:
 SLUG: ftvecbweonsgxxtdzjmz
 KEY: sb_publishable_c4ckS2DLwXt2vvC7kO75Dw_SbK40aa1
 URL: https://ftvecbweonsgxxtdzjmz.supabase.co/rest/v1/
+
+
+
+BAYOT KO, DUGAY RA
