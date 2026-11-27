@@ -83,6 +83,8 @@ main { padding: 34px 32px 50px; min-width: 0; }
 .g2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .g3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .g4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.g5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.g5 .big { font-size: 28px; }
 
 .tools { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; align-items: center; }
 .tools h2 { margin: 0; }
@@ -105,6 +107,7 @@ main { padding: 34px 32px 50px; min-width: 0; }
 .kv { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 8px 0; border-top: 1px solid var(--line); }
 .kv > span:first-child { color: var(--mut); font-size: 13px; }
 .kv > span:last-child { text-align: right; }
+.kv small { display: block; color: var(--mut); }
 
 /* ---------- Pills ---------- */
 .pill { display: inline-block; padding: 3px 10px; border-radius: 99px; font-size: 12px; font-weight: 600; white-space: nowrap; }
@@ -160,7 +163,7 @@ td small { display: block; color: var(--mut); }
 
 /* ---------- Responsive ---------- */
 @media (max-width: 1100px) {
-  .g3, .g4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .g3, .g4, .g5 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 900px) {
@@ -177,7 +180,7 @@ td small { display: block; color: var(--mut); }
 }
 
 @media (max-width: 560px) {
-  .g2, .g3, .g4 { grid-template-columns: minmax(0, 1fr); }
+  .g2, .g3, .g4, .g5 { grid-template-columns: minmax(0, 1fr); }
   .two { grid-template-columns: minmax(0, 1fr); }
   .tools .sp { display: none; }
   .card { padding: 16px; }

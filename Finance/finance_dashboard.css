@@ -4,11 +4,8 @@
 body:has(#dashboard:target) .nav a[href="#dashboard"],
 body:has(#budget:target) .nav a[href="#budget"],
 body:has(#expenses:target) .nav a[href="#expenses"],
-body:has(#invoices:target) .nav a[href="#invoices"],
-body:has(#payments:target) .nav a[href="#payments"],
-body:has(#transactions:target) .nav a[href="#transactions"],
-body:has(#reports:target) .nav a[href="#reports"],
-body:has(#documents:target) .nav a[href="#documents"] { color: #fff; background: #3a3a3a; }
+body:has(#purchasing:target) .nav a[href="#purchasing"],
+body:has(#reports:target) .nav a[href="#reports"] { color: #fff; background: #3a3a3a; }
 
 /* Five summary cards on the Finance dashboard */
 .metrics.five { grid-template-columns: repeat(5, minmax(0, 1fr)); }
@@ -17,11 +14,18 @@ body:has(#documents:target) .nav a[href="#documents"] { color: #fff; background:
 @media (max-width: 800px)  { .metrics.five { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 520px)  { .metrics.five { grid-template-columns: 1fr; } }
 
-/* Simple monthly bar chart (pure CSS) */
+/* Simple monthly bar chart (pure CSS, filled from real expenses) */
 .chart { display: flex; align-items: flex-end; gap: 14px; height: 250px; padding: 48px 22px 14px; }
 .chart .col { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; height: 100%; gap: 8px; font-size: 11px; color: var(--mut); }
-.chart .col i { display: block; width: 100%; max-width: 46px; background: var(--ink); border-radius: 5px 5px 0 0; }
+.chart .col i { display: block; width: 100%; max-width: 46px; min-height: 2px; background: var(--ink); border-radius: 5px 5px 0 0; }
 .chart .col.now i { background: var(--warn); }
 .chart .col b { color: var(--ink); font-size: 11px; }
 
 .amount { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+
+/* Small "current" tag next to a budget period that includes today */
+.now-tag { display: inline-block; margin-left: 8px; padding: 1px 8px; border-radius: 99px; background: var(--ok-bg); color: var(--ok); font-size: 11px; font-weight: 700; vertical-align: middle; }
+
+/* Notice banner (load problems) */
+#f-notice { margin: 0 0 16px; }
+.negative { color: var(--bad); }

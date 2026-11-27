@@ -1,5 +1,7 @@
 // Admin/admin_modules.js - PHYNX ERP Admin: live Dashboard, Inventory, Purchasing, Delivery,
-// Users, Finance, Documents and Reports. Read-only. Uses the existing window.supabaseClient.
+// Users, Finance, Documents and Reports.
+// Admin only MONITORS purchasing/finance. The one purchasing action Admin keeps is approving
+// Inventory restock requests (purchase_admin_decide). Budget approval belongs to Finance.
 // Security: everything here is limited by Supabase RLS; no keys, no service role.
 (function () {
   'use strict';
@@ -25,6 +27,9 @@
     Confirmed: 'approved', Delayed: 'rejected', Received: 'approved', Cancelled: 'rejected', Scheduled: 'received',
     Completed: 'approved', 'With Issues': 'inspection', Open: 'rejected', Resolved: 'approved' };
   const sbadge = s => badge(s, CLS[s]);
+  // A purchase request that is still 'Pending' is waiting for Finance, not for Admin.
+  const PR_LABEL = { Pending: 'Awaiting Finance', Approved: 'Finance approved' };
+  const prBadge = s => badge(PR_LABEL[s] || s, CLS[s]);
 
   async function get(table, cols = '*', mod) {
     let q = sb.from(table).select(cols);
@@ -57,6 +62,8 @@
   const INCOMING = ['Pending', 'Scheduled', 'Delayed'];
   const ACTIVE_PO = ['Sent', 'Confirmed', 'Delayed'];
   const on = (el, ev, fn) => { if (el) el.addEventListener(ev, fn); };
+  const pct = (u, a) => a > 0 ? Math.round(u / a * 100) : (u > 0 ? 100 : 0);
+  const barCls = p => p >= 90 ? 'danger' : p >= 75 ? 'warn' : 'ok';
 
   function csv(filename, headers, rows) {
     const q = c => '"' + String(c ?? '').replace(/"/g, '""') + '"';
@@ -67,7 +74,7 @@
   }
 
   // =====================================================================
-  // DASHBOARD (counters, recent transactions, summaries, notifications)
+  // DASHBOARD
   // The two requisition counters are handled by admin_requisitions.js
   // =====================================================================
   async function loadDashboard() {
@@ -79,14 +86,15 @@
     [2, 3].forEach(i => { vals[i].textContent = '…'; });
     if (txBody) loading(txBody, 4);
     try {
-      const [prods, moves, pos, dels, discs, notes, pend] = await Promise.all([
+      const [prods, moves, pos, dels, discs, notes, pend, prs] = await Promise.all([
         get('inventory_products'),
         get('inventory_movements', '*', q => q.order('created_at', { ascending: false }).limit(10)),
         get('purchase_orders', '*', q => q.order('created_at', { ascending: false })),
         get('deliveries', '*', q => q.order('created_at', { ascending: false })),
         get('delivery_discrepancies', 'id,status'),
         get('marketing_notifications', 'message,created_at', q => q.order('created_at', { ascending: false }).limit(3)),
-        get('requisition_workflow', 'id', q => q.eq('workflow_stage', 'Admin Review'))
+        get('requisition_workflow', 'id', q => q.eq('workflow_stage', 'Admin Review')),
+        get('purchase_requests', 'id,status', q => q.eq('status', 'Pending'))
       ]);
       const act = prods.filter(p => !p.archived), pname = {}; prods.forEach(p => { pname[p.sku] = p; });
       const activePos = pos.filter(p => ACTIVE_PO.includes(p.status));
@@ -99,7 +107,6 @@
       vals[3].textContent = incoming.length;
       foots[3].textContent = `${delayed.length} delayed`;
 
-      // Recent transactions: stock movements, purchase orders, received deliveries
       const items = [];
       moves.forEach(m => { const p = pname[m.sku] || {}; items.push({ date: m.movement_date,
         title: `Stock ${m.type === 'in' ? 'received' : 'released'}, ${m.ref_no}`, sub: `${p.name || m.sku}, ${num(m.qty)} ${p.unit || ''}`,
@@ -114,7 +121,6 @@
         <td>${esc(i.dept)}</td><td>${fd(i.date)}</td><td>${i.badge}</td></tr>`).join('')
         : msgRow(4, 'No transactions recorded yet.', 'empty-msg');
 
-      // Inventory summary (no reserved stock: the database does not track it)
       const low = act.filter(p => stockOf(p) === 'Low'), out = act.filter(p => stockOf(p) === 'Out');
       const total = act.length || 1;
       $('.panel-body', side[0]).innerHTML =
@@ -122,7 +128,6 @@
         bar('Low-stock items', `${low.length} items`, low.length / total * 100, 'warn') +
         bar('Out of stock', `${out.length} items`, out.length / total * 100, 'danger');
 
-      // Delivery status
       const onTime = incoming.length - delayed.length;
       const doneN = dels.filter(d => ['Received', 'Completed'].includes(d.status)).length;
       const tot = dels.length || 1;
@@ -130,9 +135,9 @@
         bar('On schedule', onTime, onTime / tot * 100, 'ok') + bar('Delayed', delayed.length, delayed.length / tot * 100, 'danger') +
         bar('Received / completed', doneN, doneN / tot * 100, '');
 
-      // Notifications (all calculated from real records)
       const n = [];
       if (pend.length) n.push([`${pend.length} requisition${pend.length > 1 ? 's' : ''} need a decision`, 'Now']);
+      if (prs.length) n.push([`${prs.length} purchase request${prs.length > 1 ? 's are' : ' is'} waiting for Finance`, 'Budget validation']);
       low.slice(0, 2).forEach(p => n.push([`${p.name} is below minimum stock`, `${num(p.qty)} ${p.unit} left`]));
       out.slice(0, 2).forEach(p => n.push([`${p.name} is out of stock`, 'Needs restocking']));
       if (delayed.length) n.push([`${delayed.length} deliver${delayed.length > 1 ? 'ies are' : 'y is'} delayed`, 'Check Delivery Monitoring']);
@@ -191,176 +196,93 @@
   }
 
   // =====================================================================
-  // PURCHASING MONITORING
+  // PURCHASING MONITORING (read-only, except Inventory restock requests)
   // =====================================================================
-  
-  // =====================================================================
-  // PURCHASING MONITORING
-  // =====================================================================
-
   let purRows = [];
 
   async function loadPurchasing() {
-    const sec = $('#purchasing');
-    const tb = $('tbody', sec);
-
-    metricsLoading(sec);
-    loading(tb, 9);
-
-    setHead($('table', sec), [
-      'PURCHASE REQUEST',
-      'PURCHASE ORDER',
-      'SUPPLIER',
-      'ITEM',
-      'QTY',
-      'COST',
-      'ORDER DATE',
-      'STATUS',
-      'ACTION'
-    ]);
-
+    const sec = $('#purchasing'), tb = $('tbody', sec);
+    metricsLoading(sec); loading(tb, 8);
+    setHead($('table', sec), ['PURCHASE REQUEST', 'PURCHASE ORDER', 'SUPPLIER', 'ITEM', 'QTY', 'COST', 'ORDER DATE', 'STATUS']);
     try {
       const [prs, pos, sups] = await Promise.all([
-        get('purchase_requests', '*',
-          q => q.order('created_at', { ascending: false })),
-        get('purchase_orders', '*',
-          q => q.order('created_at', { ascending: false })),
+        get('purchase_requests', '*', q => q.order('created_at', { ascending: false })),
+        get('purchase_orders', '*', q => q.order('created_at', { ascending: false })),
         get('suppliers', 'id,name')
       ]);
-
-      const sname = {};
-      sups.forEach(s => {
-        sname[s.id] = s.name;
-      });
-
-      const prById = {};
-      prs.forEach(p => {
-        prById[p.id] = p;
-      });
-
+      const sname = {}; sups.forEach(s => { sname[s.id] = s.name; });
+      const prById = {}; prs.forEach(p => { prById[p.id] = p; });
       const usedPr = new Set();
 
       purRows = pos.map(o => {
         const pr = prById[o.purchase_request_id];
-
         if (pr) usedPr.add(pr.id);
-
-        return {
-          prId: pr ? pr.id : null,
-          pr: pr ? pr.code : '–',
-          po: o.code,
-          supplier: sname[o.supplier_id] || '–',
-          item: o.item,
-          qty: o.qty,
-          cost: o.total,
-          date: o.order_date,
-          status: o.status
-        };
+        return { pr: pr ? pr.code : '–', po: o.code, supplier: sname[o.supplier_id] || '–', item: o.item,
+          qty: o.qty, cost: o.total, date: o.order_date, status: o.status, isPo: true };
       });
-
       prs.filter(p => !usedPr.has(p.id)).forEach(p => {
-        purRows.push({
-          prId: p.id,
-          pr: p.code,
-          po: '–',
-          supplier: sname[p.supplier_id] || '–',
-          item: p.item,
-          qty: p.qty,
-          cost: p.est_cost,
-          date: String(p.created_at).slice(0, 10),
-          status: p.status
-        });
+        purRows.push({ pr: p.code, po: '–', supplier: sname[p.supplier_id] || '–', item: p.item, qty: p.qty,
+          cost: p.est_cost, date: String(p.created_at).slice(0, 10), status: p.status, isPo: false });
       });
 
       const open = pos.filter(o => ACTIVE_PO.includes(o.status));
-
-      metric(
-        sec, 0, 'Purchase Requests',
-        prs.length,
-        `${prs.filter(p => p.status === 'Pending').length} pending`
-      );
-
-      metric(
-        sec, 1, 'Active Orders',
-        open.length,
-        'Sent, confirmed or delayed'
-      );
-
-      metric(
-        sec, 2, 'Open Order Value',
-        peso(open.reduce((s, o) => s + Number(o.total), 0)),
-        'Total of active orders'
-      );
-
-      metric(
-        sec, 3, 'Cancelled',
-        pos.filter(o => o.status === 'Cancelled').length,
-        'Purchase orders'
-      );
+      metric(sec, 0, 'Purchase Requests', prs.length, `${prs.filter(p => p.status === 'Pending').length} awaiting Finance`);
+      metric(sec, 1, 'Active Orders', open.length, 'Sent, confirmed or delayed');
+      metric(sec, 2, 'Open Order Value', peso(open.reduce((s, o) => s + Number(o.total), 0)), 'Total of active orders');
+      metric(sec, 3, 'Cancelled', pos.filter(o => o.status === 'Cancelled').length, 'Purchase orders');
 
       const sels = $$('.toolbar select', sec);
-
-      fillSelect(
-        sels[0],
-        'All suppliers',
-        [...new Set(purRows.map(r => r.supplier)
-          .filter(s => s !== '–'))].sort()
-      );
-
-      fillSelect(
-        sels[1],
-        'All statuses',
-        [...new Set(purRows.map(r => r.status))].sort()
-      );
-
+      fillSelect(sels[0], 'All suppliers', [...new Set(purRows.map(r => r.supplier).filter(s => s !== '–'))].sort());
+      fillSelect(sels[1], 'All statuses', [...new Set(purRows.map(r => r.status))].sort());
       drawPurchasing();
-
-    } catch (e) {
-      fail(tb, 9, e);
-    }
+    } catch (e) { fail(tb, 8, e); }
+    loadRestock();
   }
 
   function drawPurchasing() {
-    const sec = $('#purchasing');
-    const tb = $('tbody', sec);
-    const sels = $$('.toolbar select', sec);
-
-    const q = ($('.toolbar input', sec).value || '')
-      .trim().toLowerCase();
-
-    const list = purRows.filter(r =>
-      (!sels[0].value || r.supplier === sels[0].value) &&
+    const sec = $('#purchasing'), tb = $('tbody', sec), sels = $$('.toolbar select', sec);
+    const q = ($('.toolbar input', sec).value || '').trim().toLowerCase();
+    const list = purRows.filter(r => (!sels[0].value || r.supplier === sels[0].value) &&
       (!sels[1].value || r.status === sels[1].value) &&
-      (!q || [r.pr, r.po, r.supplier, r.item]
-        .join(' ').toLowerCase().includes(q))
-    );
-
-    tb.innerHTML = list.length
-      ? list.map(r => `
-        <tr>
-          <td class="primary-cell">${esc(r.pr)}</td>
-          <td class="primary-cell">${esc(r.po)}</td>
-          <td>${esc(r.supplier)}</td>
-          <td>${esc(r.item)}</td>
-          <td>${num(r.qty)}</td>
-          <td>${peso(r.cost)}</td>
-          <td>${fd(r.date)}</td>
-          <td>${sbadge(r.status)}</td>
-          <td>
-            ${
-              r.prId && r.status === 'Pending'
-                ? `<button type="button"
-                     data-approve-pr="${r.prId}">
-                     Approve
-                   </button>`
-                : '–'
-            }
-          </td>
-        </tr>
-      `).join('')
-      : msgRow(9, 'No purchase requests or orders found.', 'empty-msg');
+      (!q || [r.pr, r.po, r.supplier, r.item].join(' ').toLowerCase().includes(q)));
+    tb.innerHTML = list.length ? list.map(r => `<tr>
+      <td class="primary-cell">${esc(r.pr)}</td><td class="primary-cell">${esc(r.po)}</td><td>${esc(r.supplier)}</td>
+      <td>${esc(r.item)}</td><td>${num(r.qty)}</td><td>${peso(r.cost)}</td><td>${fd(r.date)}</td>
+      <td>${r.isPo ? sbadge(r.status) : prBadge(r.status)}</td></tr>`).join('')
+      : msgRow(8, 'No purchase requests or orders found.', 'empty-msg');
   }
 
+  // Admin step for Inventory restock requests (low-stock products not tied to a requisition)
+  async function loadRestock() {
+    const sec = $('#purchasing');
+    let box = $('#pur-restock', sec);
+    if (!box) { box = document.createElement('div'); box.id = 'pur-restock'; box.className = 'panel'; sec.appendChild(box); }
+    try {
+      const rows = await get('inventory_purchase_requests', '*', q => q.eq('status', 'Pending Admin').order('created_at'));
+      if (!rows.length) { box.innerHTML = ''; box.style.display = 'none'; return; }
+      box.style.display = '';
+      box.innerHTML = `<div class="panel-head"><div><h2>Restock requests awaiting Admin approval</h2>
+        <div class="panel-sub">Low-stock requests from Inventory. After you approve, Finance validates the budget, then Procurement orders.</div></div></div>
+        <div class="table-wrap"><table><thead><tr><th>REFERENCE</th><th>ITEM</th><th>QTY</th><th>FROM</th><th>NOTES</th><th>ACTIONS</th></tr></thead><tbody>` +
+        rows.map(r => `<tr><td class="primary-cell">${esc(r.code)}</td><td>${esc(r.item_name)}</td><td>${num(r.qty)} ${esc(r.unit)}</td>
+          <td>${esc(r.origin_department)}</td><td>${esc(r.notes || '–')}</td>
+          <td><div class="row-actions"><button type="button" class="mini approve" data-ipr="approve" data-id="${r.id}">Approve</button>
+          <button type="button" class="mini reject" data-ipr="reject" data-id="${r.id}">Reject</button></div></td></tr>`).join('') +
+        '</tbody></table></div>';
+    } catch (e) { console.warn('restock panel', e); box.innerHTML = ''; box.style.display = 'none'; }
+  }
+
+  on($('#purchasing'), 'click', async e => {
+    const b = e.target.closest('[data-ipr]'); if (!b) return;
+    const approve = b.dataset.ipr === 'approve';
+    let note = '';
+    if (!approve) { note = (prompt('Reason for rejecting this restock request?') || '').trim(); if (note.length < 3) { alert('Enter a reason.'); return; } }
+    else if (!confirm('Approve this restock request? It will go to Finance for budget validation.')) return;
+    b.disabled = true;
+    const { error } = await sb.rpc('purchase_admin_decide', { p_id: Number(b.dataset.id), p_approve: approve, p_note: note });
+    if (error) { alert('Could not save: ' + error.message); b.disabled = false; return; }
+    loadPurchasing();
+  });
 
   // =====================================================================
   // DELIVERY MONITORING
@@ -376,28 +298,13 @@
         get('delivery_discrepancies', '*', q => q.order('created_at', { ascending: false }))]);
       const sname = {}, pcode = {}, dcode = {}; sups.forEach(s => { sname[s.id] = s.name; }); pos.forEach(p => { pcode[p.id] = p.code; });
       dels.forEach(d => { dcode[d.id] = d.code; });
-  const today = todayIso();
-
-delRows = dels.map(d => {
-    const isOverdue =
-        INCOMING.includes(d.status) &&
-        d.expected_date &&
-        d.expected_date < today;
-
-    return {
-        code: d.code,
-        supplier: sname[d.supplier_id] || '–',
-        po: pcode[d.purchase_order_id] || '–',
-        items: d.items || '–',
-        qty: d.qty,
-        expected: d.expected_date,
-        received: d.received_date,
-        status: isOverdue ? 'Delayed' : d.status
-    };
-});
-
-const week = addDays(today, 6);
-const inc = dels.filter(d => INCOMING.includes(d.status));
+      const today = todayIso();
+      delRows = dels.map(d => ({
+        code: d.code, supplier: sname[d.supplier_id] || '–', po: pcode[d.purchase_order_id] || '–', items: d.items || '–',
+        qty: d.qty, expected: d.expected_date, received: d.received_date,
+        status: INCOMING.includes(d.status) && d.expected_date && d.expected_date < today ? 'Delayed' : d.status }));
+      const week = addDays(today, 6);
+      const inc = dels.filter(d => INCOMING.includes(d.status));
       metric(sec, 0, 'Incoming', inc.length, 'Pending, scheduled or delayed');
       metric(sec, 1, 'Expected This Week', inc.filter(d => d.expected_date && d.expected_date >= today && d.expected_date <= week).length, `${fd(today)} – ${fd(week)}`);
       metric(sec, 2, 'Delayed', inc.filter(d => d.status === 'Delayed' || (d.expected_date && d.expected_date < today)).length, 'Delayed or past expected date');
@@ -409,7 +316,7 @@ const inc = dels.filter(d => INCOMING.includes(d.status));
 
       let box = $('#dl-disc', sec);
       if (!box) { box = document.createElement('div'); box.id = 'dl-disc'; box.className = 'panel'; sec.appendChild(box); }
-      box.innerHTML = `<div class="panel-head"><div><h2>Delivery discrepancies</h2><div class="panel-sub">Damaged, missing or incomplete items reported by Logistics and Inventory</div></div></div>
+      box.innerHTML = `<div class="panel-head"><div><h2>Delivery discrepancies</h2><div class="panel-sub">Damaged or missing items found by Inventory inspection</div></div></div>
         <div class="table-wrap"><table><thead><tr><th>REFERENCE</th><th>DELIVERY</th><th>ISSUE</th><th>REPORTED</th><th>RESOLUTION</th><th>STATUS</th></tr></thead><tbody>` +
         (discs.length ? discs.map(x => `<tr><td class="primary-cell">${esc(x.code)}</td><td>${esc(dcode[x.delivery_id] || '–')}</td><td>${esc(x.issue)}</td>
           <td>${fd(x.created_at)}</td><td>${esc(x.resolution || '–')}</td><td>${sbadge(x.status)}</td></tr>`).join('')
@@ -427,14 +334,13 @@ const inc = dels.filter(d => INCOMING.includes(d.status));
   }
 
   // =====================================================================
-  // USER MANAGEMENT (view only; needs 06_admin_profiles_read.sql)
+  // USER MANAGEMENT (view only)
   // =====================================================================
   let userRows = [];
   async function loadUsers() {
     const sec = $('#users'), tb = $('tbody', sec);
     metricsLoading(sec); loading(tb, 3);
     setHead($('table', sec), ['USERNAME', 'DEPARTMENT', 'ROLE']);
-    const btn = $('.actions button', sec); if (btn) { btn.disabled = true; btn.title = 'Account creation needs a secure server function and is not enabled yet.'; btn.style.opacity = '.5'; btn.style.cursor = 'not-allowed'; }
     const note = $('.note', sec); if (note) note.textContent = 'View only. Passwords are never shown. Creating or editing accounts needs a secure server function and is not enabled yet.';
     try {
       userRows = await get('profiles', 'username,department,role,created_at', q => q.order('username'));
@@ -459,7 +365,7 @@ const inc = dels.filter(d => INCOMING.includes(d.status));
   }
 
   // =====================================================================
-  // FINANCE MONITORING (only real figures; no finance tables exist yet)
+  // FINANCE MONITORING (read-only; real budgets, expenses and purchase costs)
   // =====================================================================
   async function loadFinance() {
     const sec = $('#finance'), heading = $('.heading', sec);
@@ -468,28 +374,56 @@ const inc = dels.filter(d => INCOMING.includes(d.status));
     wrap.innerHTML = '<div class="panel"><div class="panel-body loading-msg">Loading…</div></div>';
     sec.appendChild(wrap);
     try {
-      const [pos, prs, prods] = await Promise.all([get('purchase_orders', 'total,status'), get('purchase_requests', 'est_cost,status'), get('inventory_products', 'qty,unit_cost,archived')]);
-      const sum = (a, f) => a.reduce((s, x) => s + Number(f(x) || 0), 0);
+      const [bud, exp, pc, prq] = await Promise.all([
+        get('v_department_budgets', '*', q => q.order('period_start', { ascending: false })),
+        get('expenses', '*', q => q.order('expense_date', { ascending: false }).limit(50)),
+        get('v_purchase_costs', '*', q => q.order('po_id', { ascending: false })),
+        get('v_finance_purchase_requests', '*', q => q.order('created_at', { ascending: false }))
+      ]);
+      const t = todayIso();
+      const cur = bud.filter(b => b.period_start <= t && t <= b.period_end);
+      const used = b => Number(b.expenses_total) + Number(b.po_committed);
+      const allocated = cur.reduce((s, b) => s + Number(b.amount), 0), usedAmt = cur.reduce((s, b) => s + used(b), 0);
+      const openPo = pc.filter(p => ACTIVE_PO.includes(p.po_status));
+      const waiting = prq.filter(p => p.status === 'Pending');
+      const unpaid = exp.filter(e => e.payment_status === 'Unpaid');
+      const m = (l, v, f) => `<div class="metric"><div class="metric-top"><span>${esc(l)}</span></div><div class="metric-value">${esc(v)}</div><div class="metric-foot">${esc(f)}</div></div>`;
+
       wrap.innerHTML = `<div class="metrics">
-        <div class="metric"><div class="metric-top"><span>Open Purchase Orders</span></div><div class="metric-value">${peso(sum(pos.filter(p => ACTIVE_PO.includes(p.status)), p => p.total))}</div><div class="metric-foot">Sent, confirmed or delayed</div></div>
-        <div class="metric"><div class="metric-top"><span>Received Orders</span></div><div class="metric-value">${peso(sum(pos.filter(p => p.status === 'Received'), p => p.total))}</div><div class="metric-foot">Purchase orders marked received</div></div>
-        <div class="metric"><div class="metric-top"><span>Pending Requests (est.)</span></div><div class="metric-value">${peso(sum(prs.filter(p => p.status === 'Pending'), p => p.est_cost))}</div><div class="metric-foot">Estimated cost of pending purchase requests</div></div>
-        <div class="metric"><div class="metric-top"><span>Inventory Value</span></div><div class="metric-value">${peso(sum(prods.filter(p => !p.archived), p => Number(p.qty) * Number(p.unit_cost)))}</div><div class="metric-foot">Quantity × unit cost</div></div></div>
-        <div class="panel"><div class="panel-head"><div><h2>Budgets, expenses, invoices and payments</h2><div class="panel-sub">Not available yet</div></div></div>
-        <div class="note">The database has no tables for department budgets, expenses, supplier invoices or payments, so these are not shown and no figures are invented.
-        The four numbers above come from real purchase order, purchase request and inventory records. Once the finance tables are approved and created, this page can show budgets, expenses, outstanding invoices and payments.</div></div>`;
-    } catch (e) { console.error(e); wrap.innerHTML = `<div class="panel"><div class="panel-body error-msg">Could not load data: ${esc(e.message || e)}</div></div>`; }
+        ${m('Allocated Budget', peso(allocated), cur.length ? `${cur.length} budget${cur.length > 1 ? 's' : ''} active today` : 'No budget set for today')}
+        ${m('Budget Used', peso(usedAmt), allocated ? `${pct(usedAmt, allocated)}% of budget` : 'Expenses + open orders')}
+        ${m('Open Purchase Orders', peso(openPo.reduce((s, p) => s + Number(p.total), 0)), `${openPo.length} not yet received`)}
+        ${m('Awaiting Finance', String(waiting.length), `${peso(waiting.reduce((s, p) => s + Number(p.est_cost), 0))} estimated`)}</div>
+
+        <div class="panel"><div class="panel-head"><div><h2>Department budgets</h2><div class="panel-sub">Set by Finance. Admin views only.</div></div></div>
+        <div class="table-wrap"><table><thead><tr><th>DEPARTMENT</th><th>PERIOD</th><th>ALLOCATED</th><th>USED</th><th>REMAINING</th><th style="width:20%">UTILIZATION</th></tr></thead><tbody>` +
+        (bud.length ? bud.map(b => { const u = used(b), p = pct(u, Number(b.amount));
+          return `<tr><td class="primary-cell">${esc(b.department)}</td><td>${fd(b.period_start)} – ${fd(b.period_end)}</td><td>${peso(b.amount)}</td><td>${peso(u)}</td>
+          <td>${peso(Number(b.amount) - u)}</td><td><div class="bar ${barCls(p)}"><span style="width:${Math.min(100, p)}%"></span></div><div class="secondary-cell">${p}%</div></td></tr>`; }).join('')
+          : msgRow(6, 'Finance has not set any budget yet.', 'empty-msg')) + `</tbody></table></div></div>
+
+        <div class="panel"><div class="panel-head"><div><h2>Purchase requests waiting for Finance</h2><div class="panel-sub">Procurement cannot order these until Finance approves the budget.</div></div></div>
+        <div class="table-wrap"><table><thead><tr><th>REQUEST</th><th>ITEM</th><th>QTY</th><th>DEPARTMENT</th><th>FOR</th><th>EST. COST</th></tr></thead><tbody>` +
+        (waiting.length ? waiting.map(p => `<tr><td class="primary-cell">${esc(p.code)}</td><td>${esc(p.item)}</td><td>${num(p.qty)}</td><td>${esc(p.department)}</td>
+          <td>${esc(p.requisition_ref || 'Restock')}</td><td>${peso(p.est_cost)}</td></tr>`).join('')
+          : msgRow(6, 'Nothing is waiting for Finance.', 'empty-msg')) + `</tbody></table></div></div>
+
+        <div class="panel"><div class="panel-head"><div><h2>Recent expenses</h2><div class="panel-sub">${unpaid.length} unpaid, ${peso(unpaid.reduce((s, e) => s + Number(e.amount), 0))}</div></div></div>
+        <div class="table-wrap"><table><thead><tr><th>REFERENCE</th><th>DATE</th><th>DEPARTMENT</th><th>CATEGORY</th><th>DESCRIPTION</th><th>AMOUNT</th><th>PAYMENT</th></tr></thead><tbody>` +
+        (exp.length ? exp.slice(0, 15).map(e => `<tr><td class="primary-cell">${esc(e.code || '')}</td><td>${fd(e.expense_date)}</td><td>${esc(e.department)}</td><td>${esc(e.category)}</td>
+          <td>${esc(e.description)}</td><td>${peso(e.amount)}</td><td>${badge(e.payment_status, e.payment_status === 'Paid' ? 'approved' : 'pending')}</td></tr>`).join('')
+          : msgRow(7, 'No expenses recorded yet.', 'empty-msg')) + '</tbody></table></div></div>';
+    } catch (e) { console.error(e); wrap.innerHTML = `<div class="panel"><div class="panel-body error-msg">Could not load data: ${esc(e.message || e)}. If this is new, run 01_requisition_chain_fix.sql in Supabase.</div></div>`; }
   }
 
   // =====================================================================
-  // RECEIPTS AND DOCUMENTS (the receipts table only)
+  // RECEIPTS AND DOCUMENTS
   // =====================================================================
   let docRows = [];
   async function loadDocuments() {
     const sec = $('#documents'), tb = $('tbody', sec);
     loading(tb, 4);
     setHead($('table', sec), ['REFERENCE', 'TYPE', 'RELATED TO', 'DATE']);
-    const up = $('.actions button', sec); if (up) { up.disabled = true; up.title = 'Uploads are not enabled yet.'; up.style.opacity = '.5'; up.style.cursor = 'not-allowed'; }
     try {
       const [rc, pos, dels, discs, wf] = await Promise.all([get('receipts', '*', q => q.order('issued_at', { ascending: false })),
         get('purchase_orders', 'id,code'), get('deliveries', 'id,code'), get('delivery_discrepancies', 'id'), get('requisition_workflow', 'id')]);
@@ -515,7 +449,7 @@ const inc = dels.filter(d => INCOMING.includes(d.status));
   }
 
   // =====================================================================
-  // REPORTS (real records, filters, CSV of the filtered result)
+  // REPORTS
   // =====================================================================
   const REPORTS = ['requisition', 'inventory', 'purchasing', 'delivery', 'activity'];
   const rep = { type: 'requisition', result: { headers: [], rows: [] } };
@@ -560,10 +494,7 @@ const inc = dels.filter(d => INCOMING.includes(d.status));
     loading(tb, 4);
     try {
       const res = await buildReport(rep.type);
-      if (res.unavailable) {
-        setHead($('table', sec), ['REPORT']); tb.innerHTML = msgRow(1, 'Finance reports are not available yet: the database has no budget, expense, invoice or payment tables.', 'empty-msg');
-        rep.result = { headers: [], rows: [] }; if (note) note.textContent = ''; return;
-      }
+      if (res.unavailable) { setHead($('table', sec), ['REPORT']); tb.innerHTML = msgRow(1, 'This report is not available.', 'empty-msg'); rep.result = { headers: [], rows: [] }; return; }
       fillSelect(dsel, 'All departments', [...new Set(res.rows.map(r => r.dept).filter(Boolean))].sort());
       fillSelect(ssel, 'All statuses', [...new Set(res.rows.map(r => r.status).filter(Boolean))].sort());
       const list = res.rows.filter(r => (!from.value || (r.date && String(r.date).slice(0, 10) >= from.value)) &&
@@ -594,7 +525,7 @@ const inc = dels.filter(d => INCOMING.includes(d.status));
   }
 
   // =====================================================================
-  // Wiring: load a page when it is opened, and bind filters once
+  // Wiring
   // =====================================================================
   const LOADERS = { dashboard: loadDashboard, inventory: loadInventory, purchasing: loadPurchasing, delivery: loadDelivery,
     users: loadUsers, finance: loadFinance, documents: loadDocuments, reports: generateReport };
@@ -604,69 +535,6 @@ const inc = dels.filter(d => INCOMING.includes(d.status));
     const sec = $(id); if (!sec) return;
     on($('.toolbar input', sec), 'input', fn);
     $$('.toolbar select', sec).forEach(s => s.addEventListener('change', fn));
-  });
-
-  // ADMIN APPROVAL FOR PURCHASE REQUESTS
-
-  on($('#purchasing tbody'), 'click', async e => {
-    const btn = e.target.closest('[data-approve-pr]');
-
-    if (!btn) return;
-
-    const id = Number(btn.dataset.approvePr);
-
-    if (!Number.isInteger(id)) {
-      alert('Invalid purchase request ID.');
-      return;
-    }
-
-    if (!confirm('Approve this purchase request?')) {
-      return;
-    }
-
-    try {
-      const {
-        data: { user },
-        error: userError
-      } = await sb.auth.getUser();
-
-      if (userError || !user) {
-        alert('Unable to verify Admin account.');
-        return;
-      }
-
-      btn.disabled = true;
-      btn.textContent = 'Approving...';
-
-      const { data, error } = await sb
-        .from('purchase_requests')
-        .update({
-          status: 'Approved',
-          approved_by: user.id
-        })
-        .eq('id', id)
-        .eq('status', 'Pending')
-        .select('id');
-
-      if (error) throw error;
-
-      if (!data || data.length === 0) {
-        alert(
-          'No request was updated. Check Admin permissions and request status.'
-        );
-        await loadPurchasing();
-        return;
-      }
-
-      alert('Purchase request approved successfully!');
-
-      await loadPurchasing();
-
-    } catch (error) {
-      console.error('Purchase approval error:', error);
-      alert('Approval failed: ' + error.message);
-      await loadPurchasing();
-    }
   });
 
   bindReports();

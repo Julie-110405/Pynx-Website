@@ -44,7 +44,17 @@
     'Completed':            ['Completed', 'pill--ok']
   };
   // The real requisition status is the authority for "waiting for Admin", so a stale stage can never hide Approve/Reject.
-  const stageOf = r => (r.source_status === 'Pending' ? 'Admin Review' : r.workflow_stage);
+  // Inventory updates marketing_requisitions.status (Partial / Completed). If the workflow stage has not
+  // caught up yet (still "Inventory Validation"), the real status is used so Admin always shows the right stage.
+  const stageOf = r => {
+    if (r.source_status === 'Pending') return 'Admin Review';
+    if (r.source_status === 'Rejected') return 'Rejected';
+    if (r.workflow_stage === 'Inventory Validation') {
+      if (r.source_status === 'Completed') return 'Released';
+      if (r.source_status === 'Partial') return 'Partially Released';
+    }
+    return r.workflow_stage;
+  };
   const stageBadge = s => { const [l, c] = STAGES[s] || [s, '']; return `<span class="status ${c}">${esc(l)}</span>`; };
   const progressBadge = s => { const [l, c] = PROGRESS[s] || [s, '']; return `<span class="pill ${c}">${esc(l)}</span>`; };
   const itemsText = r => (r.items || []).map(i => `${i.name}, ${num(i.qty)} ${i.unit}`).join('; ') || '–';
@@ -447,6 +457,25 @@
     toast(`${r.reference} ${decision.toLowerCase()}.`);
     await load(true);
   }
+
+  // ---------- Live updates ----------
+  // When Marketing or Inventory change a requisition, the list refreshes by itself.
+  // Needs Realtime enabled for these tables in Supabase; the 60-second refresh below is the fallback.
+  try {
+    let liveTimer;
+    const soft = () => {
+      clearTimeout(liveTimer);
+      liveTimer = setTimeout(() => {
+        if (!$('#rw-modal') && !deciding) load(true);
+      }, 600);
+    };
+    sb.channel('admin-req-live')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'marketing_requisitions' }, soft)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'marketing_requisition_items' }, soft)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'inventory_requisition_checks' }, soft)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'inventory_purchase_requests' }, soft)
+      .subscribe();
+  } catch (e) { console.warn('Live updates unavailable:', e); }
 
   // ---------- Start, then refresh every 60 seconds ----------
   await load();
